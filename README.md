@@ -99,8 +99,7 @@ print(result.passed, result.output)
 
 ## Docs
 
-- [`design.md`](design.md) — architecture and degrade rules
-- [`docs/DEV.md`](docs/DEV.md) — protocol, artifacts, prompts
+- [`docs/DEV.md`](docs/DEV.md) — architecture, protocol, artifacts, prompts
 - [`docs/SKILLS.md`](docs/SKILLS.md) — j-space / fact-graph install
 
 ## License

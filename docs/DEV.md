@@ -1,6 +1,6 @@
 # Flame 开发文档
 
-实现真源。架构与取舍见 [`design.md`](../design.md)；skill 安装见 [`SKILLS.md`](SKILLS.md)。
+实现真源。skill 安装见 [`SKILLS.md`](SKILLS.md)。
 
 ## 1. 目标与完成标准
 
@@ -39,7 +39,6 @@ original.md
 
 ```
 flame/
-  design.md
   docs/DEV.md
   docs/SKILLS.md
   README.md
