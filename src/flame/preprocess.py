@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from flame import budget, prompts
+from flame.backend import AgentBackend, extract_json
+from flame.log import SessionLog
+from flame.progress import Progress
+from flame.types import Brief, Effort, Phase, QUADRANT_KEYS
+
+
+class PreprocessResult:
+    def __init__(self, *, brief: str = "", degraded: bool = False):
+        self.brief = brief
+        self.degraded = degraded
+
+
+def run_preprocess(
+    backend: AgentBackend,
+    log: SessionLog,
+    progress: Progress,
+    original_task: str,
+    flame_dir: Path,
+    effort: Effort,
+) -> PreprocessResult:
+    """One-shot intake. Never raises; worst case returns no brief."""
+    if not budget.use_preprocess(effort):
+        return PreprocessResult()
+
+    progress.phase("preprocess")
+    log.emit("phase", phase="preprocess")
+    try:
+        return _build_brief(backend, log, progress, original_task, flame_dir, effort)
+    except Exception as err:  # noqa: BLE001 — preprocess must not block plan
+        progress.fail(f"preprocess failed, using original: {err}")
+        log.emit("preprocess_degraded", error=str(err))
+        return PreprocessResult(degraded=True)
+
+
+def _build_brief(
+    backend: AgentBackend,
+    log: SessionLog,
+    progress: Progress,
+    task: str,
+    flame_dir: Path,
+    effort: Effort,
+) -> PreprocessResult:
+    brief = Brief()
+    judge_text = ""
+    if budget.use_meld(effort):
+        judge_text, judge_obj = _meld(backend, log, progress, task, flame_dir)
+        brief.judge = judge_obj
+
+    brief.quadrants = _quadrants(backend, log, progress, task, judge_text)
+    success, failure, move = _factors(
+        backend, log, progress, task, brief.quadrants, judge_text
+    )
+    brief.success_factors = success
+    brief.failure_factors = failure
+    brief.decisive_move = move
+
+    if brief.empty():
+        progress.fail("preprocess produced nothing, using original")
+        return PreprocessResult(degraded=True)
+
+    payload = brief.to_dict()
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    (flame_dir / "brief.json").write_text(text + "\n", encoding="utf-8")
+    return PreprocessResult(brief=text)
+
+
+def _meld(
+    backend: AgentBackend,
+    log: SessionLog,
+    progress: Progress,
+    task: str,
+    flame_dir: Path,
+) -> tuple[str, dict[str, Any] | None]:
+    progress.note("meld panels")
+    jobs = [
+        {
+            "prompt": prompts.meld_panel_prompt(task, role, desc),
+            "phase": Phase.meld,
+            "force": False,
+            "mode": "ask",
+        }
+        for role, desc in prompts.MELD_ROLES
+    ]
+    panels = backend.run_parallel(jobs)
+    blobs: list[str] = []
+    for (role, _desc), panel in zip(prompts.MELD_ROLES, panels, strict=True):
+        log.emit("agent_done", phase="meld", role=role, error=panel.is_error, code=panel.returncode)
+        if panel.is_error or not panel.text.strip():
+            continue
+        blobs.append(f"### {role}\n{panel.text.strip()}")
+    if len(blobs) < 2:
+        progress.fail("meld: fewer than 2 panels, skip judge")
+        log.emit("meld_skipped", reason="not_enough_panels", n=len(blobs))
+        return "", None
+    progress.note("meld judge")
+    judge = backend.run(
+        prompts.meld_judge_prompt(task, "\n\n".join(blobs)),
+        phase=Phase.meld,
+        force=False,
+        mode="ask",
+    )
+    log.emit("agent_done", phase="meld_judge", error=judge.is_error, code=judge.returncode)
+    payload = extract_json(judge.text) if not judge.is_error else None
+    if payload is None:
+        progress.fail("meld judge JSON missing; quadrants continue without it")
+        return "", None
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    (flame_dir / "meld-judge.json").write_text(text + "\n", encoding="utf-8")
+    return text, payload
+
+
+def _quadrants(
+    backend: AgentBackend,
+    log: SessionLog,
+    progress: Progress,
+    task: str,
+    judge_json: str,
+) -> dict[str, list[str]]:
+    progress.note("quadrants")
+    result = backend.run(
+        prompts.quadrants_prompt(task, judge_json),
+        phase=Phase.quadrants,
+        force=False,
+        mode="ask",
+    )
+    log.emit("agent_done", phase="quadrants", error=result.is_error, code=result.returncode)
+    empty = {key: [] for key in QUADRANT_KEYS}
+    if result.is_error or not result.text.strip():
+        progress.fail("quadrants failed; factors continue with an empty table")
+        return empty
+    payload = extract_json(result.text)
+    if not isinstance(payload, dict):
+        progress.fail("quadrants JSON missing; factors continue with an empty table")
+        return empty
+    return {key: _str_list(payload.get(key), cap=5) for key in QUADRANT_KEYS}
+
+
+def _factors(
+    backend: AgentBackend,
+    log: SessionLog,
+    progress: Progress,
+    task: str,
+    quadrants: dict[str, list[str]],
+    judge_json: str,
+) -> tuple[list[str], list[str], str]:
+    progress.note("factors")
+    qtext = json.dumps(quadrants, ensure_ascii=False, indent=2)
+    result = backend.run(
+        prompts.factors_prompt(task, qtext, judge_json),
+        phase=Phase.factors,
+        force=False,
+        mode="ask",
+    )
+    log.emit("agent_done", phase="factors", error=result.is_error, code=result.returncode)
+    if result.is_error or not result.text.strip():
+        progress.fail("factors failed; brief keeps quadrants only")
+        return [], [], ""
+    payload = extract_json(result.text)
+    if not isinstance(payload, dict):
+        progress.fail("factors JSON missing; brief keeps quadrants only")
+        return [], [], ""
+    move = str(payload.get("decisive_move") or "").strip()
+    return (
+        _str_list(payload.get("success_factors"), cap=3),
+        _str_list(payload.get("failure_factors"), cap=3),
+        move,
+    )
+
+
+def _str_list(value: Any, *, cap: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [str(item).strip() for item in value if str(item).strip()]
+    return items[:cap]

@@ -1,0 +1,84 @@
+# fact-graph 配置示例。board(title/origin/goal/bootstrap_enabled)由 orchestrator init 写入
+# board.json, 本文件只描述运行期参数与 worker。复制为 run 目录下的 config.toml 后修改。
+#
+# 注意: 含 API key 的 config.toml 不要提交进 git。env 值支持 ${VAR} 从环境变量插值。
+# Worker 调用 Cursor CLI: agent -p --output-format json --trust [--force] --resume <chatId>
+
+[runtime]
+max_workers = 3          # 同时运行中的任务总数上限
+interval = 3             # 主循环节拍(秒)
+max_reason_rounds = 20   # reason 最大轮次(护栏)
+max_facts = 40           # 事实数上限(含 origin/goal, 护栏)
+wallclock_budget = 1800  # 总时长预算(秒, 护栏)
+prompt_group = "default" # prompts/<group>/; 自测用 "mock"
+# cwd = "."              # worker 工作目录, 默认编排器启动目录
+
+[tasks.bootstrap]
+timeout = 1800
+conclude_timeout = 600
+[tasks.reason]
+timeout = 300
+[tasks.explore]
+timeout = 1200
+conclude_timeout = 600
+
+# ─────────────────────────────────────────────────────────────
+# worker = 一个独立的 LLM 并发配额单元。
+# command 缺省为 "agent"（Cursor CLI）。claude / cursor / cursor-agent 会自动映射为 agent。
+# skip_permissions 缺省 true, 即附加 --force --trust --sandbox disabled。
+# false 时使用 --sandbox enabled（Cursor CLI 无 --allowedTools）。
+
+# 控制面: bootstrap + reason
+[[worker]]
+name = "reasoner"
+command = "agent"
+task_types = ["bootstrap", "reason"]
+max_running = 1
+priority = 9
+env = { CURSOR_MODEL = "auto" }
+
+# 执行面: explore
+[[worker]]
+name = "explorer"
+command = "agent"
+task_types = ["explore"]
+max_running = 1
+priority = 9
+env = { CURSOR_MODEL = "auto" }
+
+# ── 覆盖模型（继承本机登录）────────────────────────────────
+# [[worker]]
+# name = "composer"
+# command = "agent"
+# task_types = ["reason", "explore"]
+# max_running = 2
+# priority = 0
+# env = { CURSOR_MODEL = "auto" }
+
+# ── 独立 API key ────────────────────────────────────────────
+# [[worker]]
+# name = "key-2"
+# command = "agent"
+# task_types = ["explore"]
+# max_running = 1
+# priority = 1
+# env = { CURSOR_API_KEY = "${CURSOR_API_KEY_2}", CURSOR_MODEL = "auto" }
+
+# ── 额外 CLI 参数（会插在 agent 与 -p 之间）────────────────
+# [[worker]]
+# name = "ask-mode"
+# command = "agent"
+# args = ["--mode", "ask"]
+# task_types = ["reason"]
+# max_running = 1
+# skip_permissions = false
+# priority = 2
+
+# ── mock worker(零 token 自测, 需配合 prompt_group = "mock")──
+# [[worker]]
+# name = "mock"
+# command = "mock"
+# task_types = ["bootstrap", "reason", "explore"]
+# max_running = 2
+# priority = 0
+# env = { MOCK_BOOTSTRAP = "{\"delay\":[0.1,0.5],\"outcomes\":{\"fact\":1.0}}", MOCK_BOOTSTRAP_CONCLUDE = "{\"delay\":[0.1,0.5],\"outcomes\":{\"fact\":1.0}}", MOCK_REASON = "{\"delay\":[0.1,0.5],\"outcomes\":{\"intent\":1.0}}", MOCK_EXPLORE_EXECUTE = "{\"delay\":[0.1,0.5],\"outcomes\":{\"fact\":1.0}}", MOCK_EXPLORE_CONCLUDE = "{\"delay\":[0.1,0.5],\"outcomes\":{\"fact\":1.0}}" }

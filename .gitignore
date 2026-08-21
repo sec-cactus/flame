@@ -1,0 +1,36 @@
+# runtime / local
+.flame/
+.fact-graph/
+.jspace/
+runs/
+tests/.tmp/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.zip
+
+# secrets / local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+hosts.yml
+.secrets/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
