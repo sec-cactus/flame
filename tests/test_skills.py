@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from flame import prompts, skills
 from flame.cli import main
-from flame.types import Plan, SearchKind
+from flame.types import Plan
 
 
 class SkillPathTests(unittest.TestCase):
@@ -50,25 +50,21 @@ class PromptSkillTests(unittest.TestCase):
             approach="a",
             constraints=["c"],
             verify_points=["v"],
-            search=SearchKind.depth,
         )
 
-    def test_fast_plan_omits_search(self) -> None:
-        text = prompts.plan_prompt("task", ask_search=False)
-        self.assertNotIn('"search"', text)
+    def test_fast_plan_omits_use_ledger(self) -> None:
+        text = prompts.plan_prompt("task", ask_use_ledger=False)
+        self.assertNotIn("use_ledger", text)
         self.assertIn("Skill ban (this phase)", text)
 
-    def test_high_plan_asks_search(self) -> None:
-        text = prompts.plan_prompt("task", ask_search=True)
-        self.assertIn('"search": "depth"', text)
-        self.assertIn("fact-graph", text)
-        self.assertIn("majority-vote", text)
-        self.assertIn("fear-missing", text)
-        self.assertIn("Do not pick \"depth\" merely because", text)
+    def test_high_plan_asks_use_ledger(self) -> None:
+        text = prompts.plan_prompt("task", ask_use_ledger=True)
+        self.assertIn('"use_ledger": true', text)
+        self.assertIn("Set use_ledger=false only when", text)
+        self.assertIn("multi-path", text)
         self.assertIn("Skill ban (this phase)", text)
-        self.assertIn("do not open those skills now", text)
-        self.assertIn("against that approach only", text)
-        self.assertIn("decide approach first, then vote search on the approach", text)
+        self.assertNotIn("majority-vote", text)
+        self.assertNotIn('"search"', text)
 
     def test_non_act_phases_ban_skills(self) -> None:
         for text in (
@@ -104,7 +100,7 @@ class PromptSkillTests(unittest.TestCase):
             "user original",
             brief=brief,
             diagnosis="points_met=False; diagnosis: keep the original request",
-            ask_search=False,
+            ask_use_ledger=False,
         )
         self.assertLess(text.index("[1 original"), text.index("[2 verify"))
         self.assertLess(text.index("[2 verify"), text.index("[3 brief"))
@@ -117,12 +113,14 @@ class PromptSkillTests(unittest.TestCase):
 
     def test_act_uses_goal_approach_constraints(self) -> None:
         text = prompts.act_prompt("orig", self.plan)
-        self.assertIn("Goal: g", text)
+        self.assertIn("Original user request (= plan.goal, harness-forced):", text)
+        self.assertIn("orig", text)
         self.assertIn("Approach:", text)
         self.assertIn("Constraints:", text)
         self.assertNotIn("Unknown (attack first)", text)
         self.assertNotIn("Milestones:", text)
         self.assertIn("Skill ban (this act)", text)
+        self.assertIn("verbatim copy of the original", prompts.plan_prompt("orig"))
 
     def test_verify_uses_original_and_points(self) -> None:
         text = prompts.verify_prompt("orig", self.plan)
@@ -141,25 +139,43 @@ class PromptSkillTests(unittest.TestCase):
         self.assertIn("timed out after 30s", text)
         self.assertIn("do not treat silence as infeasibility", text)
 
-    def test_act_depth_mentions_jspace(self) -> None:
+    def test_act_jspace_mentions_effort_high(self) -> None:
         text = prompts.act_prompt("task", self.plan, skill="j-space", jspace_dir="/tmp/j-space")
         self.assertIn("[Flame act skill: j-space]", text)
+        self.assertIn("Effort=high", text)
         self.assertIn("/tmp/j-space/SKILL.md", text)
         self.assertNotIn("[Flame act skill: fact-graph]", text)
         self.assertNotIn("Skill ban (this act)", text)
         self.assertNotIn("Skill ban (this phase)", text)
 
-    def test_act_breadth_mentions_factgraph(self) -> None:
-        self.plan.search = SearchKind.breadth
+    def test_act_factgraph_mentions_effort_max(self) -> None:
         text = prompts.act_prompt(
             "task",
             self.plan,
             skill="fact-graph",
             factgraph_dir="/tmp/fact-graph",
+            graph_run_dir=".fact-graph/runs/flame-act-c1",
         )
         self.assertIn("[Flame act skill: fact-graph]", text)
+        self.assertIn("Effort=max", text)
         self.assertIn("FOREGROUND", text)
         self.assertIn("NOT Flame success", text)
+        self.assertIn("run --run-dir .fact-graph/runs/flame-act-c1", text)
+        self.assertNotIn(" init ", text)
+        self.assertIn("Do **not** re-init", text)
+
+    def test_graph_seed_roles(self) -> None:
+        seed = prompts.build_graph_seed(
+            "do the job",
+            self.plan,
+            brief="",
+            diagnosis="",
+        )
+        self.assertEqual(seed["goal"].split("\n", 1)[0], "do the job")
+        self.assertIn("- v", seed["goal"])
+        self.assertEqual(seed["constraints"], "- c")
+        self.assertEqual(seed["hint"], "a")
+        self.assertIn("No preprocess", seed["origin"])
 
 
 if __name__ == "__main__":

@@ -140,7 +140,18 @@ def add_fact(board: dict, description: str, source: str) -> dict:
     return fact
 
 
-def add_intent(board: dict, from_ids: list[str], description: str, creator: str) -> dict:
+def add_intent(
+    board: dict,
+    from_ids: list[str],
+    description: str,
+    creator: str,
+    *,
+    use_ledger: bool = False,
+) -> dict:
+    # Ledger only when this will be the sole open intent (path settled).
+    open_before = len(open_intents(board))
+    if use_ledger and open_before != 0:
+        use_ledger = False
     intent = {
         "id": _next_id(board["intents"], "i"),
         "from": list(from_ids),
@@ -148,6 +159,7 @@ def add_intent(board: dict, from_ids: list[str], description: str, creator: str)
         "description": description.strip(),
         "creator": creator,
         "worker": None,
+        "use_ledger": bool(use_ledger),
         "created_at": now_iso(),
         "concluded_at": None,
     }
@@ -231,6 +243,7 @@ def render_graph_yaml(board: dict) -> str:
         lines.append("    description: |-")
         lines += _yaml_block(intent["description"], 6)
         lines.append(f'    creator: {json.dumps(intent["creator"], ensure_ascii=False)}')
+        lines.append(f'    use_ledger: {json.dumps(bool(intent.get("use_ledger")))}')
         lines.append(f'    worker: {json.dumps(intent["worker"])}')
     return "\n".join(lines)
 
@@ -421,6 +434,54 @@ def load_config(path: Path) -> Config:
         task_timeouts=timeouts,
         workers=workers,
     )
+
+
+def resolve_jspace_dir() -> Path | None:
+    """Locate j-space skill root (same idea as Flame skills.jspace_dir, no Flame import)."""
+    env = os.environ.get("FLAME_JSPACE", "").strip()
+    candidates: list[Path] = []
+    if env:
+        candidates.append(Path(env).expanduser())
+    home = Path.home()
+    candidates.extend(
+        [
+            home / ".cursor" / "skills-cursor" / "j-space",
+            home / ".cursor" / "skills" / "j-space",
+        ]
+    )
+    for path in candidates:
+        if (path / "SKILL.md").is_file():
+            return path.resolve()
+    return None
+
+
+def intent_allows_ledger(board: dict, intent: dict) -> bool:
+    if not intent.get("use_ledger"):
+        return False
+    if is_bootstrap_intent(intent):
+        return False
+    opens = open_intents(board)
+    return len(opens) == 1 and opens[0]["id"] == intent["id"]
+
+
+def ledger_root_for(run_dir: Path, intent_id: str) -> Path:
+    return (run_dir / "ledgers" / intent_id).resolve()
+
+
+def ledger_explore_addendum(*, jspace: Path, ledger_root: Path, workspace_cwd: str) -> str:
+    script = jspace / "scripts" / "jspace.py"
+    return f"""
+# Ledger (optional deep pass for this sole open intent)
+
+use_ledger=true for this intent. Before exploring:
+1. Read `{jspace}/SKILL.md` and follow a `loop` pass.
+2. Keep the j-space ledger **only** under `{ledger_root}/` (create it if needed).
+   Run the controller with that directory as cwd, e.g.
+   `mkdir -p {ledger_root} && cd {ledger_root} && python3 {script} note --goal "..." --next "..."`
+   Never write `{workspace_cwd}/.jspace/`.
+3. Project tools (read/search/shell against the repo) still use workspace `{workspace_cwd}`.
+4. Final JSON output rules above still apply — ledger is for holding state, not a substitute for the fact description.
+"""
 
 
 def render_prompt(group: str, name: str, values: dict[str, str]) -> str:
@@ -677,7 +738,7 @@ def valid_description(result: PhaseResult) -> str | None:
 
 
 def valid_reason(result: PhaseResult, legal_fact_ids: set[str]) -> tuple | str | None:
-    """返回 ("complete", from_ids, desc) / ("intent", from_ids, desc) / "noop" / None(非法)。"""
+    """返回 ("complete", from_ids, desc) / ("intent", from_ids, desc, use_ledger) / "noop" / None(非法)。"""
     data = (result.parsed or {}).get("data")
     if not isinstance(data, dict):
         return None
@@ -685,10 +746,8 @@ def valid_reason(result: PhaseResult, legal_fact_ids: set[str]) -> tuple | str |
         return "noop"
     if "complete" in data and "intent" in data:
         return None
-    for key in ("complete", "intent"):
-        if key not in data:
-            continue
-        node = data[key]
+    if "complete" in data:
+        node = data["complete"]
         if not isinstance(node, dict):
             return None
         from_ids = node.get("from")
@@ -699,7 +758,21 @@ def valid_reason(result: PhaseResult, legal_fact_ids: set[str]) -> tuple | str |
             return None
         if any(fid not in legal_fact_ids or fid == "goal" for fid in from_ids):
             return None
-        return key, [fid.strip() for fid in from_ids], desc
+        return "complete", [fid.strip() for fid in from_ids], desc
+    if "intent" in data:
+        node = data["intent"]
+        if not isinstance(node, dict):
+            return None
+        from_ids = node.get("from")
+        desc = str(node.get("description") or "").strip()
+        if (not isinstance(from_ids, list) or not from_ids
+                or any(not isinstance(fid, str) for fid in from_ids)
+                or not desc):
+            return None
+        if any(fid not in legal_fact_ids or fid == "goal" for fid in from_ids):
+            return None
+        use_ledger = bool(node.get("use_ledger"))
+        return "intent", [fid.strip() for fid in from_ids], desc, use_ledger
     return None
 
 
@@ -796,8 +869,11 @@ class Orchestrator:
 
     def _submit(self, task_type: str, phase: str, worker: WorkerConfig,
                 prompt_name: str, values: dict[str, str],
-                intent_id: str | None, session_id: str) -> None:
+                intent_id: str | None, session_id: str,
+                prompt_suffix: str = "") -> None:
         prompt = render_prompt(self.config.prompt_group, prompt_name, values)
+        if prompt_suffix:
+            prompt = prompt.rstrip() + "\n" + prompt_suffix
         timeout_key = "timeout" if phase == "main" else "conclude_timeout"
         timeout = self.config.task_timeouts[task_type][timeout_key]
         if not worker.is_mock and phase == "main":
@@ -829,7 +905,8 @@ class Orchestrator:
             "fact_ids": json.dumps(fact_ids_for_prompt(self.board), ensure_ascii=False),
             "open_intents": json.dumps(
                 [{"id": i["id"], "from": i["from"], "description": i["description"],
-                  "creator": i["creator"], "worker": i["worker"]} for i in opens],
+                  "creator": i["creator"], "worker": i["worker"],
+                  "use_ledger": bool(i.get("use_ledger"))} for i in opens],
                 ensure_ascii=False),
         }
 
@@ -882,8 +959,40 @@ class Orchestrator:
             values = self._prompt_values()
             values["intent_id"] = intent["id"]
             values["intent_description"] = intent["description"]
-            self._submit("explore", "main", worker, "explore", values,
-                         intent["id"], uuid.uuid4().hex)
+            suffix = ""
+            if intent_allows_ledger(self.board, intent):
+                jspace = resolve_jspace_dir()
+                if jspace is None:
+                    log("intent %s use_ledger=true but j-space missing; exploring without ledger",
+                        intent["id"])
+                    self.event("ledger_skipped", intent=intent["id"], reason="jspace_missing")
+                else:
+                    root = ledger_root_for(self.run_dir, intent["id"])
+                    root.mkdir(parents=True, exist_ok=True)
+                    suffix = ledger_explore_addendum(
+                        jspace=jspace,
+                        ledger_root=root,
+                        workspace_cwd=self.cwd,
+                    )
+                    self.event("ledger_mounted", intent=intent["id"], ledger=str(root))
+                    log("intent %s ledger → %s", intent["id"], root)
+            elif intent.get("use_ledger"):
+                self.event(
+                    "ledger_skipped",
+                    intent=intent["id"],
+                    reason="open_intents!=1",
+                    open=len(open_intents(self.board)),
+                )
+            self._submit(
+                "explore",
+                "main",
+                worker,
+                "explore",
+                values,
+                intent["id"],
+                uuid.uuid4().hex,
+                prompt_suffix=suffix,
+            )
             dispatched += 1
         return dispatched
 
@@ -1064,13 +1173,30 @@ class Orchestrator:
                            outcome=outcome if isinstance(outcome, str) else outcome[0])
                 if outcome == "noop":
                     return
-                kind, from_ids, desc = outcome
-                if kind == "complete":
+                if outcome[0] == "complete":
+                    _, from_ids, desc = outcome
                     self._complete_run(from_ids, desc, record.worker.name)
                 else:
-                    intent = add_intent(self.board, from_ids, desc, record.worker.name)
-                    self.event("intent_declared", intent=intent["id"], worker=record.worker.name)
-                    log("新 intent %s: %s", intent["id"], desc[:100])
+                    _, from_ids, desc, use_ledger = outcome
+                    intent = add_intent(
+                        self.board,
+                        from_ids,
+                        desc,
+                        record.worker.name,
+                        use_ledger=use_ledger,
+                    )
+                    self.event(
+                        "intent_declared",
+                        intent=intent["id"],
+                        worker=record.worker.name,
+                        use_ledger=bool(intent.get("use_ledger")),
+                    )
+                    log(
+                        "新 intent %s use_ledger=%s: %s",
+                        intent["id"],
+                        bool(intent.get("use_ledger")),
+                        desc[:100],
+                    )
                 return
         if not result.timed_out and (result.exit_code != 0 or _accepted(result) is False):
             self.cooldown(record.worker)
@@ -1316,19 +1442,36 @@ def cmd_init(args: argparse.Namespace) -> int:
     origin = args.origin
     goal = args.goal
     constraints = args.constraints
+    hint = args.hint
+    if args.seed:
+        try:
+            seed = json.loads(Path(args.seed).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"无法读取 --seed: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(seed, dict):
+            print("--seed 必须是 JSON 对象", file=sys.stderr)
+            return 1
+        origin = str(seed.get("origin") or origin)
+        goal = str(seed.get("goal") or goal)
+        constraints = str(seed.get("constraints") or constraints)
+        hint = str(seed.get("hint") or hint)
     if args.origin_file:
         origin = Path(args.origin_file).read_text(encoding="utf-8").strip()
     if args.goal_file:
         goal = Path(args.goal_file).read_text(encoding="utf-8").strip()
     if args.constraints_file:
         constraints = Path(args.constraints_file).read_text(encoding="utf-8").strip()
+    if args.hint_file:
+        hint = Path(args.hint_file).read_text(encoding="utf-8").strip()
+    origin = (origin or "").strip()
+    goal = (goal or "").strip()
+    constraints = (constraints or "").strip()
+    hint = (hint or "").strip()
     if not origin or not goal:
         print("origin 和 goal 都不能为空", file=sys.stderr)
         return 1
     board = new_board(args.title, origin, goal, not args.no_bootstrap, constraints)
-    hint = args.hint
-    if args.hint_file:
-        hint = Path(args.hint_file).read_text(encoding="utf-8").strip()
     if hint:
         add_hint(board, hint, "human")
     save_board(run_dir, board)
@@ -1405,6 +1548,10 @@ def main() -> int:
     p_init.add_argument("--constraints-file")
     p_init.add_argument("--hint", default="", help="初始 hint(如 P1P2 攻击面); 仅参考，不能覆盖 constraints")
     p_init.add_argument("--hint-file")
+    p_init.add_argument(
+        "--seed",
+        help="JSON 种子文件 (origin/goal/constraints/hint); Flame graph_seed.json",
+    )
     p_init.add_argument("--config", help="config.toml 模板; 缺省写入默认配置")
     p_init.add_argument("--no-bootstrap", action="store_true", help="禁用 bootstrap, 初始态直接 reason")
     p_init.set_defaults(func=cmd_init)

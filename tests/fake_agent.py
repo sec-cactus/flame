@@ -189,10 +189,8 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
                 "constraints": ["do not delete .flame"],
                 "verify_points": ["done.txt exists"],
                 **(
-                    {"search": os.environ.get("FLAME_FAKE_SEARCH", "depth")}
-                    if "later act may use j-space" in prompt
-                    or "Act will use j-space" in prompt
-                    or "majority-vote" in prompt
+                    {"use_ledger": os.environ.get("FLAME_FAKE_USE_LEDGER", "1") != "0"}
+                    if "use_ledger" in prompt
                     else {}
                 ),
             }
@@ -200,11 +198,24 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
     if phase == "act":
         if force:
             (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
+            emit(
+                {
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "tool_call": {
+                        "writeToolCall": {
+                            "args": {"path": "done.txt"},
+                            "result": {"success": {"linesCreated": 1}},
+                        }
+                    },
+                }
+            )
         return "wrote done.txt"
     if phase == "verify":
         fail_once = os.environ.get("FLAME_FAKE_FAIL_ONCE") == "1"
         abort = os.environ.get("FLAME_FAKE_ABORT") == "1"
         drift = os.environ.get("FLAME_FAKE_DRIFT") == "1"
+        bad_evidence = os.environ.get("FLAME_FAKE_BAD_EVIDENCE") == "1"
         stamp = flame_dir / "verify_attempt"
         points_met = (workspace / "done.txt").is_file()
         aligned = True
@@ -212,6 +223,7 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
         diagnosis = ""
         retry = True
         drift_list: list[str] = []
+        checks = [f"done.txt exists={ (workspace / 'done.txt').is_file() }"]
         if abort:
             points_met = False
             retry = False
@@ -225,13 +237,16 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
             stamp.write_text("1\n", encoding="utf-8")
             points_met = False
             diagnosis = "first-pass fake failure"
+        elif bad_evidence and not stamp.is_file():
+            stamp.write_text("1\n", encoding="utf-8")
+            checks = ["no_such_evidence_file_12345.txt supports the claim"]
         passed = points_met and aligned and evidence_ok
         payload = {
             "points_met": points_met,
             "aligned": aligned,
             "evidence_ok": evidence_ok,
             "retry": retry,
-            "checks": [f"done.txt exists={ (workspace / 'done.txt').is_file() }"],
+            "checks": checks,
             "drift": drift_list,
             "evidence_gaps": [],
             "diagnosis": diagnosis,

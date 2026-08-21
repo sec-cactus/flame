@@ -4,6 +4,7 @@
 .jspace/
 runs/
 tests/.tmp/
+tests/.tmp_evidence/
 
 # python
 __pycache__/

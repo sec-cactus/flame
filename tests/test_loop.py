@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from flame.config import Config
-from flame.loop import FlameError, run
+from flame.loop import FlameError, _plan_from, run
 from flame.progress import Progress
 from flame.safety import SafetyDenied
 from flame.types import Effort
@@ -27,12 +27,13 @@ class LoopTests(unittest.TestCase):
         os.environ.pop("FLAME_FAKE_FAIL_ONCE", None)
         os.environ.pop("FLAME_FAKE_ABORT", None)
         os.environ.pop("FLAME_FAKE_DRIFT", None)
-        os.environ.pop("FLAME_FAKE_SEARCH", None)
         os.environ.pop("FLAME_FAKE_PREPROCESS_FAIL", None)
         os.environ.pop("FLAME_FAKE_PLAN_FAIL", None)
         os.environ.pop("FLAME_FAKE_VERIFY_FAIL", None)
         os.environ.pop("FLAME_FAKE_ACT_FAIL", None)
         os.environ.pop("FLAME_FAKE_ACT_TIMEOUT", None)
+        os.environ.pop("FLAME_FAKE_BAD_EVIDENCE", None)
+        os.environ.pop("FLAME_FAKE_USE_LEDGER", None)
         self.root = Path(__file__).resolve().parent / ".tmp"
         self.root.mkdir(exist_ok=True)
 
@@ -135,7 +136,7 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(result.cycles, 1)
         self.assertIn("safety cap", buf.getvalue())
 
-    def test_high_depth_uses_jspace(self) -> None:
+    def test_high_default_uses_jspace(self) -> None:
         workspace = self._workspace("jspace")
         buf = io.StringIO()
         result = run(
@@ -146,26 +147,85 @@ class LoopTests(unittest.TestCase):
         self.assertTrue(result.passed, result.output)
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
         self.assertEqual(skill["skill"], "j-space")
-        self.assertEqual(skill["search"], "depth")
+        self.assertTrue(skill["use_ledger"])
         self.assertIn("skill=j-space", buf.getvalue())
         plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
-        self.assertEqual(plan["search"], "depth")
+        self.assertTrue(plan["use_ledger"])
 
-    def test_high_breadth_uses_factgraph(self) -> None:
-        os.environ["FLAME_FAKE_SEARCH"] = "breadth"
-        workspace = self._workspace("factgraph")
+    def test_high_can_skip_ledger(self) -> None:
+        os.environ["FLAME_FAKE_USE_LEDGER"] = "0"
+        workspace = self._workspace("no_ledger")
         buf = io.StringIO()
         result = run(
             "create done.txt",
+            config=self._cfg(workspace, Effort.high),
+            progress=Progress(stream=buf),
+        )
+        self.assertTrue(result.passed, result.output)
+        skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
+        self.assertIsNone(skill["skill"])
+        self.assertFalse(skill["use_ledger"])
+        self.assertIn("use_ledger=false", buf.getvalue())
+
+    def test_max_uses_factgraph(self) -> None:
+        workspace = self._workspace("factgraph")
+        buf = io.StringIO()
+        task = "create done.txt"
+        result = run(
+            task,
             config=self._cfg(workspace, Effort.max),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
         self.assertEqual(skill["skill"], "fact-graph")
-        self.assertEqual(skill["search"], "breadth")
+        self.assertIsNone(skill["use_ledger"])
         self.assertIn("skill=fact-graph", buf.getvalue())
         self.assertTrue(skill["factgraph"])
+        self.assertEqual(skill["graph_seed"], "graph_seed.json")
+        self.assertEqual(skill["graph_run"], ".fact-graph/runs/flame-act-c1")
+        plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["goal"], task)
+        seed = json.loads((workspace / ".flame" / "graph_seed.json").read_text(encoding="utf-8"))
+        self.assertIn(task, seed["goal"])
+        self.assertIn("Verify points", seed["goal"])
+        self.assertIn("Brief", seed["origin"])
+        self.assertTrue(seed["hint"])
+        board = json.loads(
+            (workspace / ".fact-graph" / "runs" / "flame-act-c1" / "board.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        goal = next(f for f in board["facts"] if f["id"] == "goal")["description"]
+        self.assertIn(task, goal)
+        self.assertEqual(board["constraints"], seed["constraints"])
+        self.assertIn("goal: original (harness-forced)", buf.getvalue())
+        self.assertIn("fact-graph inited:", buf.getvalue())
+
+    def test_plan_goal_forced_to_original(self) -> None:
+        workspace = self._workspace("goal_force")
+        task = "create done.txt"
+        result = run(task, config=self._cfg(workspace), progress=Progress(stream=io.StringIO()))
+        self.assertTrue(result.passed, result.output)
+        plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["goal"], task)
+        self.assertNotEqual(plan["goal"], "complete the flame task")
+        self.assertFalse((workspace / ".flame" / "graph_seed.json").is_file())
+
+    def test_empty_goal_keeps_approach_and_points(self) -> None:
+        plan = _plan_from(
+            {
+                "goal": "",
+                "approach": "write the file",
+                "constraints": ["must touch disk"],
+                "verify_points": ["done.txt exists"],
+            },
+            ask_use_ledger=False,
+        )
+        self.assertEqual(plan.approach, "write the file")
+        self.assertEqual(plan.constraints, ["must touch disk"])
+        self.assertEqual(plan.verify_points, ["done.txt exists"])
+        self.assertFalse(plan.degraded)
 
     def test_high_brief_without_meld(self) -> None:
         workspace = self._workspace("bsp")
@@ -253,6 +313,20 @@ class LoopTests(unittest.TestCase):
         self.assertFalse(result.verify.retry if result.verify else True)
         self.assertIn("verify will not retry", buf.getvalue())
 
+    def test_evidence_audit_rejects_hallucinated_handle(self) -> None:
+        os.environ["FLAME_FAKE_BAD_EVIDENCE"] = "1"
+        workspace = self._workspace("bad_evidence")
+        buf = io.StringIO()
+        result = run(
+            "create done.txt",
+            config=self._cfg(workspace, Effort.standard),
+            progress=Progress(stream=buf),
+        )
+        self.assertTrue(result.passed, result.output)
+        self.assertGreaterEqual(result.cycles, 2)
+        self.assertIn("evidence_ok=False", buf.getvalue())
+        self.assertTrue((workspace / ".flame" / "tool_trace.json").is_file())
+
     def test_verify_drift_steers_replan(self) -> None:
         os.environ["FLAME_FAKE_DRIFT"] = "1"
         workspace = self._workspace("drift")
@@ -298,17 +372,6 @@ class LoopTests(unittest.TestCase):
         self.assertTrue((workspace / "done.txt").is_file())
         self.assertIn("wrote done.txt", result.output)
         self.assertIn("verify degraded", buf.getvalue())
-
-    def test_search_aliases_ignore_algorithm_names(self) -> None:
-        from flame.loop import _search_from
-        from flame.types import SearchKind
-
-        self.assertEqual(_search_from("depth"), SearchKind.depth)
-        self.assertEqual(_search_from("breadth"), SearchKind.breadth)
-        self.assertEqual(_search_from("wide"), SearchKind.breadth)
-        self.assertIsNone(_search_from("bfs"))
-        self.assertIsNone(_search_from("graph"))
-        self.assertEqual(_search_from("dfs"), SearchKind.depth)
 
     def test_act_fail_is_error(self) -> None:
         os.environ["FLAME_FAKE_ACT_FAIL"] = "1"

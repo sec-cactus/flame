@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
 
-from flame import budget, preprocess, prompts, skills
+from flame import budget, evidence, preprocess, prompts, skills
 from flame.backend import AgentBackend, extract_json
 from flame.config import Config
 from flame.log import SessionLog
 from flame.progress import Progress
 from flame.safety import SafetyDenied, deny_reason
-from flame.types import Effort, Phase, Plan, RunResult, SearchKind, VerifyResult
+from flame.types import Effort, Phase, Plan, RunResult, VerifyResult
 
 
 class FlameError(RuntimeError):
@@ -78,31 +81,66 @@ def run(
             diagnosis,
             flame_dir,
             original_task,
-            ask_search=budget.use_act_skills(cfg.effort),
+            ask_use_ledger=budget.ask_use_ledger(cfg.effort),
         )
-        if not budget.use_act_skills(cfg.effort):
-            plan.search = None
-        elif plan.search is None:
-            plan.search = SearchKind.depth
+        plan.goal = original_task.strip()
+        if budget.ask_use_ledger(cfg.effort) and plan.use_ledger is None:
+            plan.use_ledger = True
+        elif not budget.ask_use_ledger(cfg.effort):
+            plan.use_ledger = None
         _write_plan(flame_dir / "plan.json", plan)
-        skill = _act_skill(plan)
-        progress.note(f"goal: {plan.goal}")
+        skill = _act_skill(cfg.effort, plan)
+        progress.note("goal: original (harness-forced)")
         if plan.degraded:
             progress.fail("plan degraded; act will run on the original request")
         if skill:
-            progress.note(f"search={plan.search.value} skill={skill}")
+            progress.note(f"skill={skill}")
+        elif cfg.effort is Effort.high and plan.use_ledger is False:
+            progress.note("use_ledger=false; act without j-space")
 
         log.emit("phase", phase="act", cycle=cycle)
         progress.phase("act", cap)
         jspace = skills.jspace_dir()
         factgraph = skills.factgraph_dir()
+        graph_seed_path = flame_dir / "graph_seed.json"
+        graph_run_rel = ""
+        if skill == "fact-graph":
+            if factgraph is None:
+                raise FlameError("fact-graph skill missing on disk")
+            seed = prompts.build_graph_seed(
+                original_task,
+                plan,
+                brief=brief_text,
+                diagnosis=diagnosis,
+            )
+            graph_seed_path.write_text(
+                json.dumps(seed, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            graph_run_rel = _init_factgraph_board(
+                workspace=cfg.workspace,
+                factgraph=factgraph,
+                seed_path=graph_seed_path,
+                cycle=cycle,
+            )
+            (flame_dir / "graph_run.json").write_text(
+                json.dumps({"run_dir": graph_run_rel}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            progress.note(f"fact-graph inited: {graph_run_rel}")
+        else:
+            graph_seed_path.unlink(missing_ok=True)
+            (flame_dir / "graph_run.json").unlink(missing_ok=True)
         (flame_dir / "act_skill.json").write_text(
             json.dumps(
                 {
-                    "search": plan.search.value if plan.search else None,
+                    "effort": cfg.effort.value,
                     "skill": skill,
+                    "use_ledger": plan.use_ledger,
                     "jspace": str(jspace) if jspace else None,
                     "factgraph": str(factgraph) if factgraph else None,
+                    "graph_seed": str(graph_seed_path.name) if skill == "fact-graph" else None,
+                    "graph_run": graph_run_rel or None,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -110,6 +148,8 @@ def run(
             + "\n",
             encoding="utf-8",
         )
+        cycle_trace = evidence.ToolTrace()
+        act_trace = evidence.ToolTrace()
         act = backend.run(
             prompts.act_prompt(
                 original_task,
@@ -117,11 +157,14 @@ def run(
                 skill=skill,
                 jspace_dir=str(jspace) if jspace else "",
                 factgraph_dir=str(factgraph) if factgraph else "",
+                graph_run_dir=graph_run_rel,
             ),
             phase=Phase.act,
             force=True,
             mode=None,
+            on_event=lambda event: evidence.collect_tool_event(event, act_trace),
         )
+        cycle_trace.absorb(act_trace)
         log.emit("agent_done", phase="act", error=act.is_error, code=act.returncode)
         act_note = ""
         if act.is_error and not act.timed_out:
@@ -163,6 +206,8 @@ def run(
             original_task,
             plan,
             flame_dir,
+            workspace=cfg.workspace,
+            cycle_trace=cycle_trace,
             act_note=act_note,
         )
         last_text = act_output
@@ -233,12 +278,49 @@ def run(
     )
 
 
-def _act_skill(plan: Plan) -> str | None:
-    if plan.search is SearchKind.breadth:
+def _act_skill(effort: Effort, plan: Plan) -> str | None:
+    if budget.use_factgraph(effort):
         return "fact-graph"
-    if plan.search is SearchKind.depth:
+    if budget.use_jspace(effort, plan.use_ledger):
         return "j-space"
     return None
+
+
+def _init_factgraph_board(
+    *,
+    workspace: Path,
+    factgraph: Path,
+    seed_path: Path,
+    cycle: int,
+) -> str:
+    """Harness-owned init so board goal/constraints cannot be swapped by act argv."""
+    rel = f".fact-graph/runs/flame-act-c{cycle}"
+    run_dir = workspace / rel
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    orch = factgraph / "scripts" / "orchestrator.py"
+    cmd = [
+        sys.executable,
+        str(orch),
+        "init",
+        "--run-dir",
+        str(run_dir),
+        "--title",
+        f"flame-act-c{cycle}",
+        "--seed",
+        str(seed_path),
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        raise FlameError(f"fact-graph init failed: {detail}")
+    return rel
 
 
 def _run_plan(
@@ -249,14 +331,14 @@ def _run_plan(
     flame_dir: Path,
     original_task: str,
     *,
-    ask_search: bool,
+    ask_use_ledger: bool,
 ) -> Plan:
     result = backend.run(
         prompts.plan_prompt(
             original_task,
             brief=brief,
             diagnosis=diagnosis,
-            ask_search=ask_search,
+            ask_use_ledger=ask_use_ledger,
         ),
         phase=Phase.plan,
         force=True,
@@ -267,8 +349,8 @@ def _run_plan(
     if payload is None:
         (flame_dir / "plan.raw.txt").write_text(result.text or result.stderr, encoding="utf-8")
         log.emit("plan_degraded", reason="no_json")
-        return _stub_plan(original_task, ask_search=ask_search)
-    plan = _plan_from(payload, ask_search=ask_search)
+        return _stub_plan(original_task, ask_use_ledger=ask_use_ledger)
+    plan = _plan_from(payload, ask_use_ledger=ask_use_ledger)
     _write_plan(flame_dir / "plan.json", plan)
     return plan
 
@@ -280,8 +362,8 @@ def _write_plan(path: Path, plan: Plan) -> None:
         "constraints": plan.constraints,
         "verify_points": plan.verify_points,
     }
-    if plan.search is not None:
-        dumped["search"] = plan.search.value
+    if plan.use_ledger is not None:
+        dumped["use_ledger"] = plan.use_ledger
     if plan.degraded:
         dumped["degraded"] = True
     path.write_text(json.dumps(dumped, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -294,14 +376,25 @@ def _run_verify(
     plan: Plan,
     flame_dir: Path,
     *,
+    workspace: Path,
+    cycle_trace: evidence.ToolTrace,
     act_note: str = "",
 ) -> VerifyResult:
+    verify_trace = evidence.ToolTrace()
     result = backend.run(
-        prompts.verify_prompt(original_task, plan, act_note=act_note),
+        prompts.verify_prompt(
+            original_task,
+            plan,
+            act_note=act_note,
+            tool_trace=evidence.render_trace_for_prompt(cycle_trace),
+        ),
         phase=Phase.verify,
         force=True,
         mode=None,
+        on_event=lambda event: evidence.collect_tool_event(event, verify_trace),
     )
+    cycle_trace.absorb(verify_trace)
+    evidence.write_trace(flame_dir / "tool_trace.json", cycle_trace)
     log.emit("agent_done", phase="verify", error=result.is_error, code=result.returncode)
     path = flame_dir / "verify.json"
     payload: dict[str, Any] | None = _read_json_file(path)
@@ -317,12 +410,23 @@ def _run_verify(
             diagnosis=result.text.strip() or "verify produced no JSON artifact",
             degraded=True,
         )
-    verify = _verify_from_payload(payload)
+    verify = _verify_from_payload(
+        payload,
+        workspace=workspace,
+        trace=cycle_trace,
+        fail_open_if_no_trace=bool(act_note),
+    )
     _write_verify(path, verify)
     return verify
 
 
-def _verify_from_payload(payload: dict[str, Any]) -> VerifyResult:
+def _verify_from_payload(
+    payload: dict[str, Any],
+    *,
+    workspace: Path | None = None,
+    trace: evidence.ToolTrace | None = None,
+    fail_open_if_no_trace: bool = False,
+) -> VerifyResult:
     checks = _str_list(payload.get("checks"))
     drift = _str_list(payload.get("drift"))
     gaps = _str_list(payload.get("evidence_gaps"))
@@ -335,11 +439,25 @@ def _verify_from_payload(payload: dict[str, Any]) -> VerifyResult:
     if points_met and not checks:
         evidence_ok = False
         if not gaps:
-            gaps = ["points claimed met but no named command/file evidence"]
+            gaps = ["points claimed met but no objective evidence handles in checks"]
+    if points_met and evidence_ok and workspace is not None and trace is not None:
+        audit = evidence.audit_checks(
+            checks,
+            workspace=workspace,
+            trace=trace,
+            fail_open_if_no_trace=fail_open_if_no_trace,
+        )
+        for gap in audit.gaps:
+            if gap not in gaps:
+                gaps.append(gap)
+        if not audit.ok:
+            evidence_ok = False
     passed = points_met and aligned and evidence_ok
     diagnosis = str(payload.get("diagnosis") or "")
     if not passed and not diagnosis:
         diagnosis = "verify rejected without diagnosis"
+    if not evidence_ok and gaps and "evidence" not in diagnosis.lower():
+        diagnosis = (diagnosis + "; " if diagnosis else "") + "evidence audit failed: " + gaps[0]
     retry = True if passed else bool(payload["retry"]) if "retry" in payload else True
     return VerifyResult(
         passed=passed,
@@ -387,20 +505,19 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _stub_plan(original: str, *, ask_search: bool) -> Plan:
-    goal = original.strip().split("\n")[0][:200] or "carry out the original request"
+def _stub_plan(original: str, *, ask_use_ledger: bool) -> Plan:
     return Plan(
-        goal=goal,
+        goal=original.strip(),
         approach="Carry out the original user request.",
         constraints=[],
         verify_points=[],
-        search=SearchKind.depth if ask_search else None,
+        use_ledger=True if ask_use_ledger else None,
         degraded=True,
     )
 
 
-def _plan_from(payload: dict[str, Any], *, ask_search: bool) -> Plan:
-    goal = str(payload.get("goal") or "").strip()
+def _plan_from(payload: dict[str, Any], *, ask_use_ledger: bool) -> Plan:
+    # goal may be empty; harness forces plan.goal = original after parse.
     approach = payload.get("approach")
     if isinstance(approach, list):
         approach = "\n".join(str(item).strip() for item in approach if str(item).strip())
@@ -412,27 +529,19 @@ def _plan_from(payload: dict[str, Any], *, ask_search: bool) -> Plan:
         approach = unknown or "\n".join(legacy)
     constraints = _str_list(payload.get("constraints"))
     verify_points = _str_list(payload.get("verify_points"))
-    if not goal:
-        return _stub_plan(approach or "carry out the original request", ask_search=ask_search)
+    use_ledger: bool | None = None
+    if ask_use_ledger:
+        if "use_ledger" not in payload:
+            use_ledger = True
+        else:
+            use_ledger = bool(payload.get("use_ledger"))
     return Plan(
-        goal=goal,
+        goal=str(payload.get("goal") or "").strip(),
         approach=approach,
         constraints=constraints,
         verify_points=verify_points,
-        search=_search_from(payload.get("search")),
+        use_ledger=use_ledger,
     )
-
-
-def _search_from(value: Any) -> SearchKind | None:
-    if value is None:
-        return None
-    raw = str(value).strip().lower()
-    # Only Flame search kinds. Do not map algorithm names (e.g. "bfs") — those are task topics.
-    if raw in {"depth", "deep", "dfs", "linear"}:
-        return SearchKind.depth
-    if raw in {"breadth", "wide"}:
-        return SearchKind.breadth
-    return None
 
 
 def _str_list(value: Any) -> list[str]:

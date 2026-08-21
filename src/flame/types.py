@@ -22,11 +22,6 @@ class Phase(StrEnum):
     verify = "verify"
 
 
-class SearchKind(StrEnum):
-    depth = "depth"
-    breadth = "breadth"
-
-
 BRIEF_SCHEMA = "flame.brief.v1"
 
 QUADRANT_KEYS = (
@@ -132,7 +127,7 @@ class Plan:
     approach: str
     constraints: list[str]
     verify_points: list[str]
-    search: SearchKind | None = None
+    use_ledger: bool | None = None  # high only: mount j-space; default True when asked
     degraded: bool = False
 
 

@@ -26,7 +26,7 @@ original.md
        retry=false → stdout = diagnosis
        verify 降级 / fast 一轮未过 → stdout = act 文本
        act 超时 → act_status.json + 半成品交 verify（可 retry）
-       retry → 下一轮 plan（不再 preprocess；search 可重投）
+       retry → 下一轮 plan（不再 preprocess）
 ```
 
 强制规则：
@@ -43,21 +43,25 @@ flame/
   docs/SKILLS.md
   README.md
   LICENSE
+  todo.md            # 开放 backlog（低优项）
   pyproject.toml
   src/flame/
-    loop.py          # 主循环
+    loop.py          # 主循环；plan.goal 强制；max 开图 init
+    evidence.py      # tool trace + checks 句柄审计
     preprocess.py    # meld / quadrants / factors → brief.json
     prompts.py
     budget.py        # effort → 模块开关 + cycle_limit
     backend.py       # spawn agent + stream-json + timeout
     types.py         # Brief / Plan / VerifyResult
     skills.py        # j-space / fact-graph 路径
-    data/fact-graph/ # 打包的 breadth skill
+    data/fact-graph/ # 打包的 fact-graph skill
   tests/
     fake_agent.py
 ```
 
 本地试跑目录 `runs/` 不入库。依赖：Python 3.11+ **仅标准库**。运行时要本机 `agent`。
+
+工作区 `.flame/` 常见产物：`original.md`、`brief.json`、`plan.json`、`verify.json`、`act_skill.json`、`tool_trace.json`；max 另有 `graph_seed.json`、`graph_run.json`。图本身在 `.fact-graph/runs/flame-act-cN/`。
 
 ## 4. 拉起 agent
 
@@ -89,8 +93,8 @@ agent -p
 |---|---|---|---|---|
 | fast | 跳过 | 否 | 否 | 一轮 verify 后交付 |
 | standard | 四格表→因素 | 否 | 否 | verify 收；`FLAME_MAX_CYCLES` 默认 8 |
-| high | 同 standard | 否 | depth → j-space / fact-graph | 同 standard |
-| max | 同 high | 是 | 同 high | 同 standard |
+| high | 同 standard | 否 | j-space（plan.`use_ledger`，默认 true） | 同 standard |
+| max | 同 high | 是 | fact-graph（固定） | 同 standard |
 
 兼容别名：`low`→`fast`，`medium`→`standard`。
 
@@ -113,25 +117,25 @@ class Brief:
 
 @dataclass
 class Plan:
-    goal: str
+    goal: str                 # 恒等于 original（harness 强制）
     approach: str
     constraints: list[str]
     verify_points: list[str]
-    search: str | None   # high/max: depth | breadth
+    use_ledger: bool | None   # high only; default True
     degraded: bool
 ```
 
-短期记忆 = `original.md` + 可选 `brief.json` / `meld-judge.json` + 本轮 `plan.json` / `verify.json` + 上一轮 verify 报告。无跨会话存储。
+短期记忆 = `original.md` + 可选 `brief.json` / `meld-judge.json` + 本轮 `plan.json` / `verify.json` + 上一轮 verify 报告。无跨会话存储（见 `todo.md` 低优项）。
 
 ## 7. 协议
 
 prompt 第一行：`[Flame phase: meld|quadrants|factors|plan|act|verify]`。
-非 act 阶段一律带 Skill ban（禁止读 j-space / fact-graph / 任意 `SKILL.md`）；仅 act 在 `search` 选中时挂对应 skill。无 skill 的 act 同样禁止自开 skill。
+非 act 阶段一律带 Skill ban（禁止读 j-space / fact-graph / 任意 `SKILL.md`）；仅 act 在 effort 挂 skill 时加载。无 skill 的 act 同样禁止自开 skill。
 
 1. **preprocess**：只写 `brief.json`。任一步失败则该项留空；全空则无 brief。不问用户。
-2. **plan**：冲突优先级 **original > verify > brief**。brief 渲染为标签字段（decisive_move / factors / quadrants / meld_judge），不是整包 JSON。缺 brief 照样规划。
-3. **act**：按 goal / approach / constraints。high/max 的 `search`：先写本轮 approach，再对该 approach 做三问多数表决（不是对整段 original）。宽/比较/怕漏 → `breadth`(fact-graph)；深/验证/怕断 → `depth`(j-space)。平票、同文件紧耦合、或单轨迹逐步模拟 → depth。题目里的 BFS/DFS 字样不直接决定 search。
-4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。
+2. **plan**：冲突优先级 **original > verify > brief**。brief 渲染为标签字段（decisive_move / factors / quadrants / meld_judge），不是整包 JSON。缺 brief 照样规划。**`plan.goal` 恒等于 original**（harness 强制覆盖，禁止代理成功态）。high 写 `use_ledger`（默认 true；短任务或明显多路径可 false）。
+3. **act**：按 original(=goal) / approach / constraints。**high** 且 `use_ledger` → j-space；**max** → fact-graph。harness 写 `.flame/graph_seed.json` 并 `init` 开板（act 只 `run`）：`goal`=original+verify_points，`constraints`=plan.constraints，`origin`=brief+上轮 verify，`hint`=approach。图探索 / Flame verify 质检；board `complete` ≠ Flame 通过。
+4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明与本轮 tool 句柄摘要）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。Harness 对 `checks` 做**证据审计**（`evidence.py`：从 checks 抽 path/url/command；path 须存在且本轮 tool 触及；url/command 只认 trace，**不出站**）。审计失败 → `evidence_ok=false`。不复跑测试、不重做推理。`points_met` 且 `checks` 空 → 亦 `evidence_ok=false`。
 
 ## 8. 降级与退出码
 

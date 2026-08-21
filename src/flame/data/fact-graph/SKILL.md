@@ -18,7 +18,8 @@ description: 黑板架构(事实-意图图)多智能体协同推理。当用户�
 
 ## 操作流程(主会话 = 控制面与人机接口)
 
-1. **明确问题**。与用户确认 origin(题目背景)、goal(解题目标)、constraints(解题规则与约束)、hint(初始参考，如 P1P2)、预算、是否启用 bootstrap、用哪些模型 worker。goal 要可判定。constraints 写验收命令、合格/不合格判据、禁区；hint 不能覆盖 constraints。reason/bootstrap 每轮对照 constraints。
+1. **明确问题**。与用户确认字段：`origin`（开图前**现状**/已知情境）、`goal`（解题目标，须可判定）、`constraints`（硬约束）、`hint`（策略建议）、预算、是否启用 bootstrap、用哪些模型 worker。  
+   **Flame max 开图约定（harness 组装）：** harness 写 `.flame/graph_seed.json` 并 `init --seed`；act 只 `run`。`goal` = 用户 original + verify_points；`constraints` = plan.constraints；`origin` = preprocess brief +（retry 时）上轮 verify 诊断；`hint` = plan.approach。standalone 用法仍可 `--origin/--goal` 等自行填写。constraints 写验收命令、合格/不合格判据、禁区；hint 不能覆盖 constraints。reason/bootstrap 每轮对照 constraints。reason 默认为 intent 设 `use_ledger=false`；仅当将成为唯一 open 长枝且无多路径风险时可 true，explore 账本落在 `ledgers/<intent_id>/`。
 2. **初始化 run**。每个 run 一个目录，目录路径即 run 标识：
 
    ```bash

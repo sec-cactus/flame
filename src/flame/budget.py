@@ -20,6 +20,18 @@ def use_meld(effort: Effort) -> bool:
     return effort is Effort.max
 
 
-def use_act_skills(effort: Effort) -> bool:
-    """j-space / fact-graph are only offered on high and max."""
-    return effort in {Effort.high, Effort.max}
+def ask_use_ledger(effort: Effort) -> bool:
+    """Plan is asked for use_ledger only on high."""
+    return effort is Effort.high
+
+
+def use_jspace(effort: Effort, use_ledger: bool | None) -> bool:
+    """high + use_ledger (default True) → j-space on act."""
+    if effort is not Effort.high:
+        return False
+    return True if use_ledger is None else bool(use_ledger)
+
+
+def use_factgraph(effort: Effort) -> bool:
+    """max → act always opens fact-graph."""
+    return effort is Effort.max

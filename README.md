@@ -15,7 +15,7 @@ pip install -e .
 
 ### Act skills (high / max)
 
-**fact-graph** ships in the package. **j-space does not** — install it before `effort=high` or `max` with `search=depth`:
+**fact-graph** ships in the package (used on **max**). **j-space does not** — install it before `effort=high` (default ledger):
 
 ```bash
 git clone --depth 1 https://github.com/Tiger3807861189/J-Space-Cognition-Suite-V3.6
@@ -41,23 +41,25 @@ flame run "…" --effort max --model auto
   · quadrants
   · factors
 ▶ plan  cycle 1
-  · goal: …
-  · search=depth skill=j-space
+  · goal: original (harness-forced)
+  · skill=j-space                 # high default; max → fact-graph + harness init
 ▶ act   cycle 1
 ▶ verify  cycle 1
 ✓ passed in 1 cycle(s)
 ```
 
+`plan.goal` is always the user request (harness overwrites). On **max**, Flame writes `.flame/graph_seed.json` and inits `.fact-graph/runs/flame-act-cN/` before act; act only `run`s the orchestrator. Verify audits evidence handles in `checks` (exist + touched this cycle) — not a test replay.
+
 ## Effort
 
-| effort | preprocess | meld | act skills | loop |
+| effort | preprocess | meld | act skill | loop |
 |---|---|---|---|---|
 | **fast** | skip | no | no | one verify round, then deliver |
 | **standard** (default) | quadrants → factors → `brief.json` | no | no | until verify judges |
-| **high** | same as standard | no | j-space / fact-graph | same |
-| **max** | same + meld first | yes | same as high | same |
+| **high** | same as standard | no | j-space ledger (plan may set `use_ledger=false`) | same |
+| **max** | same + meld first | yes | fact-graph (always) | same |
 
-On high/max, plan writes this cycle's **`approach` first**, then majority-votes **`search` against that approach** (not the full original wording): wide / compare-list / fear-missing → `breadth` (fact-graph); deep / verify-pierce / fear-breaking → `depth` (j-space). Tie or single-path simulation → depth. Each replan re-votes.
+**high** deepens one trajectory (direction risk accepted); plan defaults `use_ledger=true`, and turns it off only for short or clearly multi-path approaches. **max** pays for graph coverage / branching — not “strictly stronger high.” Topology is fixed by effort; plan no longer votes `search`.
 
 `FLAME_MAX_CYCLES` (default 8) is only a runaway guard for standard/high/max. Aliases: `low`→`fast`, `medium`→`standard`.
 
@@ -101,6 +103,7 @@ print(result.passed, result.output)
 
 - [`docs/DEV.md`](docs/DEV.md) — architecture, protocol, artifacts, prompts
 - [`docs/SKILLS.md`](docs/SKILLS.md) — j-space / fact-graph install
+- [`todo.md`](todo.md) — open backlog (mid-run hints / cross-run memory, low priority)
 
 ## License
 

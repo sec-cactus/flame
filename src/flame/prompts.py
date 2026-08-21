@@ -124,7 +124,7 @@ def plan_prompt(
     brief: str = "",
     diagnosis: str = "",
     *,
-    ask_search: bool = False,
+    ask_use_ledger: bool = False,
 ) -> str:
     job = original_task.strip()
     extra = f"\n[1 original — the job]\n{job}\n"
@@ -147,28 +147,17 @@ def plan_prompt(
             else "Use only where original is silent. Fields below are labeled; do not invent a new job."
         )
         extra += f"\n[3 brief — hypotheses, lowest]\n{stale}\n{brief_body}\n"
-    search_schema = ""
-    search_rules = ""
-    if ask_search:
-        search_schema = ',\n  "search": "depth"\n'
-        search_rules = """
-Also choose search (required on this effort). Order is strict:
-1. Write approach for this cycle first (concrete work left after original / verify / brief).
-2. Then majority-vote search against that approach only — not against the full original wording.
-
-Ask these three questions about the approach:
-
-1. Dimension — is this cycle's work "wide" (several parallel directions/options) or "deep" (one causal chain/path)?
-2. Goal — does the approach mainly compare/list candidates, or verify/drive through one concrete path?
-3. Risk — for this approach, is missing a possibility worse, or is broken/shallow reasoning on the critical path worse?
-
-Mapping (use Flame names depth/breadth, not algorithm jargon; do not open those skills now):
-- Majority answers wide / compare-list / fear-missing → "breadth" (later act may use fact-graph).
-- Majority answers deep / verify-pierce / fear-breaking → "depth" (later act may use j-space).
-- Tie → "depth".
-Do not pick "breadth" for tightly coupled edits to the same files, or for a single FIFO/step-trace simulation
-(even if the topic is BFS/graphs). Do not pick "depth" merely because the user said "deep" or "BFS",
-or because the original request narrates several steps end-to-end.
+    ledger_schema = ""
+    ledger_rules = ""
+    if ask_use_ledger:
+        ledger_schema = ',\n  "use_ledger": true\n'
+        ledger_rules = """
+Also set use_ledger (required on this effort). Default true.
+Harness will mount the j-space ledger skill on act when true.
+Set use_ledger=false only when:
+- this cycle's approach is short (few seams, one-shot checkable), or
+- the approach is clearly complex / multi-path (do not dig a ledger into unresolved branching).
+Omit or unclear → true. Do not open skills now.
 """
     unknown_rule = (
         "approach: lead with what verify said must change."
@@ -184,18 +173,19 @@ When inputs conflict, this order is strict:
 2. verify — if present, wins on facts about the last attempt and on what this cycle changes.
 3. brief — optional, pre-act guesses. Fills gaps only. A missing brief is fine.
 {unknown_rule}
-Act contract: goal, approach, constraints, and search (if asked). Approach is how to attack this cycle, not a second job.
-If search is asked: decide approach first, then vote search on the approach (not on original).
+Act contract: goal, approach, constraints{', and use_ledger' if ask_use_ledger else ''}.
+Goal MUST be the original user request verbatim (copy field [1]). The harness overwrites goal to original after you write — do not invent a proxy success sentence.
+Approach is how to attack this cycle, not a second job.
 Verify contract: verify_points (min-fail checks). Verify also receives the original request from the harness; you do not restate it as a new job.
-{search_rules}
+{ledger_rules}
 {extra}
 Write ONLY `.flame/plan.json` (create `.flame/` if needed). Do not change any other files.
 JSON schema:
 {{
-  "goal": "one sentence: what success looks like",
+  "goal": "verbatim copy of the original user request",
   "approach": "how to get there this cycle; first sentence is the load that if wrong fails the task",
   "constraints": ["must / must not, from original and brief"],
-  "verify_points": ["concrete min-fail checks, ideally runnable"]{search_schema}}}
+  "verify_points": ["concrete min-fail checks, ideally runnable"]{ledger_schema}}}
 You may also print the same JSON. Do not use a separate planning UI instead of this file.
 """
 
@@ -220,16 +210,16 @@ def act_prompt(
     skill: str | None = None,
     jspace_dir: str = "",
     factgraph_dir: str = "",
+    graph_run_dir: str = "",
 ) -> str:
     constraints = "\n".join(f"- {c}" for c in plan.constraints) or "- (none)"
     body = f"""[Flame phase: act]
 You are the executor for Flame. Carry out this cycle. Do not stop at a proposal — apply the changes.
 Do not delete the .flame/ directory. Do not rewrite the user request.
 
-Original user request:
+Original user request (= plan.goal, harness-forced):
 {task}
 
-Goal: {plan.goal}
 Approach:
 {plan.approach or "(none — do the original request)"}
 Constraints:
@@ -238,7 +228,10 @@ Constraints:
     if skill == "j-space":
         body += _jspace_act_addendum(jspace_dir)
     elif skill == "fact-graph":
-        body += _factgraph_act_addendum(task, plan, factgraph_dir)
+        body += _factgraph_act_addendum(
+            factgraph_dir,
+            graph_run_dir=graph_run_dir or ".fact-graph/runs/flame-act",
+        )
     else:
         body += (
             "\nSkill ban (this act): No Flame skill attached. Do not read or follow "
@@ -248,11 +241,59 @@ Constraints:
     return body
 
 
+def render_graph_origin(*, brief: str = "", diagnosis: str = "") -> str:
+    """Board origin = 现状 from preprocess brief + prior verify (not the user job)."""
+    parts: list[str] = []
+    brief_body = _brief_for_plan(brief)
+    if brief_body:
+        parts.append(
+            "## Brief (preprocess; hypotheses, not facts)\n" + brief_body
+        )
+    if diagnosis.strip():
+        parts.append("## Last verify (empirical)\n" + diagnosis.strip())
+    if not parts:
+        return (
+            "No preprocess or prior verify. Discover workspace state via "
+            "bootstrap/explore; do not invent a substitute job."
+        )
+    return "\n\n".join(parts)
+
+
+def render_graph_goal(original: str, verify_points: list[str]) -> str:
+    """Board goal = original plus verify_points as min-fail acceptance in-goal."""
+    text = original.strip()
+    points = [str(p).strip() for p in verify_points if str(p).strip()]
+    if not points:
+        return text
+    lines = "\n".join(f"- {p}" for p in points)
+    return f"{text}\n\n## Verify points (min-fail)\n{lines}"
+
+
+def render_graph_constraints(constraints: list[str]) -> str:
+    items = [str(c).strip() for c in constraints if str(c).strip()]
+    return "\n".join(f"- {c}" for c in items)
+
+
+def build_graph_seed(
+    original: str,
+    plan: Plan,
+    *,
+    brief: str = "",
+    diagnosis: str = "",
+) -> dict[str, str]:
+    return {
+        "origin": render_graph_origin(brief=brief, diagnosis=diagnosis),
+        "goal": render_graph_goal(original, plan.verify_points),
+        "constraints": render_graph_constraints(plan.constraints),
+        "hint": (plan.approach or "").strip(),
+    }
+
+
 def _jspace_act_addendum(jspace_dir: str) -> str:
     path = jspace_dir or "(j-space skill not found on disk; use the host j-space skill if loaded)"
     return f"""
 [Flame act skill: j-space]
-Plan chose depth-first search. Before implementing, read `{path}/SKILL.md` and follow it.
+Effort=high and plan.use_ledger=true. Before implementing, read `{path}/SKILL.md` and follow it.
 This is a `loop` pass: keep a `.jspace/` ledger in this workspace if the controller is available
 (`python3 {path}/scripts/jspace.py` when that file exists).
 Hold the goal through the mechanical work. Do not stop at notes — deliver the plan.
@@ -260,43 +301,54 @@ A later verify phase is the judge; you still implement and leave evidence in the
 """
 
 
-def _factgraph_act_addendum(task: str, plan: Plan, factgraph_dir: str) -> str:
+def _factgraph_act_addendum(
+    factgraph_dir: str,
+    *,
+    graph_run_dir: str,
+) -> str:
     path = factgraph_dir or "(fact-graph skill missing)"
     orch = f"{path}/scripts/orchestrator.py" if factgraph_dir else "orchestrator.py"
-    goal = plan.goal
-    constraints = "; ".join(plan.constraints) or plan.goal
     return f"""
 [Flame act skill: fact-graph]
-Plan chose breadth-first search. Follow `{path}/SKILL.md`. You are the control session.
+Effort=max: open the fact-graph. Follow `{path}/SKILL.md`. You are the control session.
+Flame harness already inited the board from `.flame/graph_seed.json` at `{graph_run_dir}`
+(origin=现状, goal=original+verify_points, constraints=plan.constraints, hint=approach).
+Do **not** re-init or change origin/goal/constraints.
+
 Run the orchestrator in the FOREGROUND and wait until it exits — do not background it.
 Flame's verify phase starts as soon as you return; a running graph is a failed act.
-
-Init then run (adjust slug if needed):
+Board complete is exploration progress only — Flame verify is the QA judge against the original request.
 
 ```bash
-RUN_DIR=.fact-graph/runs/flame-act
-python3 {orch} init --run-dir "$RUN_DIR" \\
-  --title "flame-act" \\
-  --origin {task!r} \\
-  --goal {goal!r} \\
-  --constraints {constraints!r}
-python3 {orch} run --run-dir "$RUN_DIR"
+python3 {orch} run --run-dir {graph_run_dir}
 ```
 
 Rules:
-- Orchestrator is the only writer of board.json. Inject extras with the `hint` subcommand.
+- Orchestrator is the only writer of board.json. Further human course-correction uses `hint`.
 - Independent explore workers may run in parallel; do not have them edit the same files.
 - When the orchestrator exits, apply any deliverable to this workspace. Copy or summarize
-  `$RUN_DIR/RESULT.md` into `.flame/graph-result.md`.
+  `{graph_run_dir}/RESULT.md` into `.flame/graph-result.md`.
 - Board `complete` is NOT Flame success. Leave artifacts so verify can check the original request.
 """
 
 
-def verify_prompt(original_task: str, plan: Plan, *, act_note: str = "") -> str:
+def verify_prompt(
+    original_task: str,
+    plan: Plan,
+    *,
+    act_note: str = "",
+    tool_trace: str = "",
+) -> str:
     points = "\n".join(f"- {c}" for c in plan.verify_points) or "- (none listed; judge the original request only)"
     status = ""
     if act_note.strip():
         status = f"\nAct status (from harness, not the model):\n{act_note.strip()}\n"
+    trace_block = ""
+    if tool_trace.strip():
+        trace_block = (
+            "\nTool handles touched this cycle (harness audit source; prefer citing these):\n"
+            f"{tool_trace.strip()}\n"
+        )
     return f"""[Flame phase: verify]
 You are the only judge. You control whether the loop finishes, replans, or stops.
 Do not implement new features. You may run commands to check.
@@ -306,9 +358,10 @@ Two contracts only:
 1. Original user request — did the work satisfy this, or only a proxy?
 2. verify_points — actually run min-fail checks. A check that must fail if the work is wrong.
 
-Every positive claim needs a named command, file, or output. If you cannot cite it, it is unsupported.
+Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
+The harness audits that cited handles exist and were touched this cycle; it does not re-run your work.
 retry=true means continue; retry=false means stop burning budget.
-{status}
+{status}{trace_block}
 Original user request:
 {original_task}
 
@@ -321,7 +374,7 @@ Write .flame/verify.json with this schema and no extra keys:
   "aligned": true,
   "evidence_ok": true,
   "retry": true,
-  "checks": ["command/file cited: what happened"],
+  "checks": ["handle + what it shows, e.g. path done.txt exists=true"],
   "drift": ["how this diverged from the original request, or empty"],
   "evidence_gaps": ["unsupported claims, or empty"],
   "diagnosis": "empty if done; otherwise what the next plan must change"
