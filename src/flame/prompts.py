@@ -112,9 +112,11 @@ Write ONLY a JSON object:
 {{
   "success_factors": ["at most 3: what must be true for the original request to succeed"],
   "failure_factors": ["at most 3: premortem — how this would fail"],
-  "decisive_move": "exactly one sentence: the load that, if wrong, fails the whole task"
+  "decisive_move": "exactly one sentence: the load that, if wrong, fails the whole task",
+  "summary": "1–2 plain sentences for the user: what preprocess concluded (no JSON, no path lists, ≤120 chars)"
 }}
 decisive_move must be a known unknown (already named in known_unknowns, or one you can now name because the quadrants made it speakable). It is NOT an unknown unknown — those stay in the table; they are not the attack order.
+summary is user-facing; decisive_move is planner-facing (may overlap).
 JSON only.
 """
 
@@ -184,6 +186,7 @@ JSON schema:
 {{
   "goal": "verbatim copy of the original user request",
   "approach": "how to get there this cycle; first sentence is the load that if wrong fails the task",
+  "summary": "1–2 plain sentences for the user: this cycle's plan in everyday language (no JSON, ≤120 chars)",
   "constraints": ["must / must not, from original and brief"],
   "verify_points": ["concrete min-fail checks, ideally runnable"]{ledger_schema}}}
 You may also print the same JSON. Do not use a separate planning UI instead of this file.
@@ -238,6 +241,14 @@ Constraints:
             "j-space, fact-graph, or other Cursor skills; do not create .jspace/ or "
             ".fact-graph/.\n"
         )
+    body += """
+Before you finish, write `.flame/act.json` (create `.flame/` if needed):
+{
+  "summary": "1–2 plain sentences for the user: what you delivered this cycle (no JSON, no path lists, ≤120 chars)",
+  "deliverables": ["workspace-relative files the user should read, e.g. answer.md"]
+}
+Keep doing the work in the repo; act.json is only the user-facing recap.
+"""
     return body
 
 
@@ -359,8 +370,12 @@ Two contracts only:
 2. verify_points — actually run min-fail checks. A check that must fail if the work is wrong.
 
 Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
+In each checks[] line, cite handles explicitly: `path: re.json …`, `url: …`, or a backtick command. Use workspace-relative paths only (not host absolute paths or container-only prefixes like app/ unless that directory exists).
 The harness audits that cited handles exist and were touched this cycle; it does not re-run your work.
 retry=true means continue; retry=false means stop burning budget.
+The harness finishes verify with an evidence audit of checks (exist + touched this cycle). That audit is part of verify — not a side gate.
+Set retry=false only when points/alignment already fail and more cycles cannot help.
+If evidence is the weak leg, leave retry=true so the next plan can fix handles.
 {status}{trace_block}
 Original user request:
 {original_task}
@@ -374,15 +389,18 @@ Write .flame/verify.json with this schema and no extra keys:
   "aligned": true,
   "evidence_ok": true,
   "retry": true,
-  "checks": ["handle + what it shows, e.g. path done.txt exists=true"],
+  "summary": "1–2 plain sentences for the user: pass/fail verdict in everyday language (no JSON, ≤120 chars)",
+  "checks": ["path: done.txt exists=true; or `python3 -m pytest` ran clean"],
   "drift": ["how this diverged from the original request, or empty"],
   "evidence_gaps": ["unsupported claims, or empty"],
   "diagnosis": "empty if done; otherwise what the next plan must change"
 }}
 passed is implied: points_met AND aligned AND evidence_ok.
+summary is user-facing; diagnosis is for the next plan (may be more technical).
 If verify_points is empty, judge only the original request.
 If you cannot judge at all, write nothing — the harness will deliver the act output.
-Set retry=false only when more cycles cannot help (contradictory ask, missing user-only info, same failure would recur).
+Set retry=false only when points/alignment already fail and more cycles cannot help
+(contradictory ask, missing user-only info, same failure would recur). Evidence gaps alone → leave retry=true.
 If act timed out, judge leftover workspace artifacts; do not treat silence as infeasibility.
 """
 

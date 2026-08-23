@@ -5,7 +5,7 @@ import os
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
-from flame.loop import FlameError, run
+from flame.loop import FlameError, continue_run, run
 from flame.safety import SafetyDenied
 
 
@@ -26,6 +26,22 @@ def main(argv: list[str] | None = None) -> int:
         help="enable Flame keyword safety gate (off by default; agent LLM decides refuse/degrade)",
     )
 
+    cont_p = sub.add_parser(
+        "continue",
+        help="max: hint + resume fact-graph from .flame/graph_run.json, then verify",
+    )
+    cont_p.add_argument("task", nargs="+", help="follow-up instruction (written as graph hint)")
+    cont_p.add_argument("--workspace", default=None)
+    cont_p.add_argument("--model", default=None)
+    cont_p.add_argument("--agent-bin", default=None, dest="agent_bin")
+    cont_p.add_argument("--no-force", action="store_true")
+    cont_p.add_argument(
+        "--extra-budget",
+        type=float,
+        default=None,
+        help="seconds added to fact-graph wallclock budget (default: 900)",
+    )
+
     sub.add_parser("skills", help="print resolved j-space / fact-graph paths")
     sub.add_parser("version", help="print version")
 
@@ -39,16 +55,21 @@ def main(argv: list[str] | None = None) -> int:
     task = " ".join(args.task).strip()
     if not task:
         parser.error("empty task")
+    runner = continue_run if args.cmd == "continue" else run
+    run_kwargs: dict = {
+        "task": task,
+        "workspace": args.workspace,
+        "model": args.model,
+        "agent_bin": args.agent_bin,
+        "force": False if args.no_force else None,
+    }
+    if args.cmd == "run":
+        run_kwargs["effort"] = args.effort
+        run_kwargs["safety_gate"] = True if args.safety else None
+    else:
+        run_kwargs["extra_budget"] = args.extra_budget
     try:
-        result = run(
-            task,
-            workspace=args.workspace,
-            effort=args.effort,
-            model=args.model,
-            agent_bin=args.agent_bin,
-            force=False if args.no_force else None,
-            safety_gate=True if args.safety else None,
-        )
+        result = runner(**run_kwargs)
     except SafetyDenied as err:
         print(f"flame: {err.reason}", file=sys.stderr)
         return 2

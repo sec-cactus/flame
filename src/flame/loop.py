@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from flame import budget, evidence, preprocess, prompts, skills
+from flame import budget, evidence, preprocess, prompts, skills, stage_summary
 from flame.backend import AgentBackend, extract_json
 from flame.config import Config
 from flame.log import SessionLog
@@ -19,6 +19,149 @@ from flame.types import Effort, Phase, Plan, RunResult, VerifyResult
 
 class FlameError(RuntimeError):
     pass
+
+
+DEFAULT_GRAPH_EXTRA_BUDGET_SEC = 900.0
+
+
+def continue_run(
+    task: str,
+    *,
+    workspace: str | Path | None = None,
+    model: str | None = None,
+    agent_bin: str | None = None,
+    force: bool | None = None,
+    extra_budget: float | None = None,
+    progress: Progress | None = None,
+    config: Config | None = None,
+) -> RunResult:
+    """Resume max fact-graph from `.flame/graph_run.json`: hint + orchestrator run + verify."""
+    cfg = config or Config.load(
+        workspace=workspace,
+        effort="max",
+        model=model,
+        agent_bin=agent_bin,
+        force=force,
+    )
+    if cfg.effort is not Effort.max:
+        raise FlameError("continue requires effort=max")
+    progress = progress or Progress()
+    flame_dir = cfg.workspace / ".flame"
+    flame_dir.mkdir(parents=True, exist_ok=True)
+    session_id = uuid.uuid4().hex[:12]
+    log = SessionLog(cfg.log_dir / f"{session_id}.jsonl")
+    log.emit("start", task=task, effort="max", model=cfg.model, mode="continue")
+    backend = AgentBackend(cfg, progress)
+
+    original_task = task.strip()
+    if not original_task:
+        raise FlameError("empty task")
+    (flame_dir / "original.md").write_text(original_task + "\n", encoding="utf-8")
+
+    graph_run = _read_json_file(flame_dir / "graph_run.json")
+    run_rel = str((graph_run or {}).get("run_dir") or "").strip()
+    if not run_rel:
+        raise FlameError("continue requires .flame/graph_run.json from a prior max run")
+
+    plan_payload = _read_json_file(flame_dir / "plan.json")
+    if plan_payload:
+        plan = _plan_from(plan_payload, ask_use_ledger=False)
+    else:
+        plan = _stub_plan(original_task, ask_use_ledger=False)
+    plan.goal = original_task
+
+    factgraph = skills.factgraph_dir()
+    if factgraph is None:
+        raise FlameError("fact-graph skill missing on disk")
+
+    run_dir = cfg.workspace / run_rel
+    if not (run_dir / "board.json").is_file():
+        raise FlameError(f"fact-graph run missing board.json: {run_rel}")
+
+    progress.phase("act", "continue graph")
+    log.emit("phase", phase="act", mode="continue_graph", run_dir=run_rel)
+    _graph_reopen_if_completed(
+        factgraph=factgraph,
+        run_dir=run_dir,
+        workspace=cfg.workspace,
+    )
+    _graph_hint(
+        factgraph=factgraph,
+        run_dir=run_dir,
+        content=original_task,
+        creator="proceed",
+        workspace=cfg.workspace,
+    )
+    budget_sec = (
+        DEFAULT_GRAPH_EXTRA_BUDGET_SEC
+        if extra_budget is None
+        else float(extra_budget)
+    )
+    graph_status = _graph_run_orchestrator(
+        factgraph=factgraph,
+        run_dir=run_dir,
+        workspace=cfg.workspace,
+        extra_budget=budget_sec,
+    )
+    progress.note(f"fact-graph continue ended: {graph_status}")
+    act_output = _read_graph_act_output(cfg.workspace, run_dir)
+    _finalize_act_json(
+        flame_dir,
+        cfg.workspace,
+        act_text=act_output,
+        graph_note=f"继续 fact-graph：{graph_status}",
+    )
+    cycle_trace = evidence.ToolTrace()
+    act_note = (
+        "Harness continued fact-graph via orchestrator (no act agent). "
+        "Judge workspace artifacts; paths may predate this cycle's tool trace."
+    )
+
+    log.emit("phase", phase="verify", cycle=1)
+    progress.phase("verify", "cycle 1")
+    verify = _run_verify(
+        backend,
+        log,
+        original_task,
+        plan,
+        flame_dir,
+        workspace=cfg.workspace,
+        cycle_trace=cycle_trace,
+        act_note=act_note,
+        require_evidence_touch=False,
+    )
+    if verify.degraded:
+        progress.fail("verify degraded; delivering act output")
+        log.emit("finish", passed=False, cycles=1, reason="verify_degraded")
+        return RunResult(
+            output=act_output,
+            passed=False,
+            cycles=1,
+            log_path=log.path,
+            plan=plan,
+            verify=verify,
+        )
+    if verify.passed:
+        progress.done("passed (continue)")
+        log.emit("finish", passed=True, cycles=1, mode="continue")
+        return RunResult(
+            output=act_output,
+            passed=True,
+            cycles=1,
+            log_path=log.path,
+            plan=plan,
+            verify=verify,
+        )
+    progress.fail(verify.diagnosis or "verify rejected")
+    log.emit("finish", passed=False, cycles=1, reason="verify_failed", mode="continue")
+    return RunResult(
+        output=verify.diagnosis or act_output,
+        passed=False,
+        cycles=1,
+        log_path=log.path,
+        plan=plan,
+        verify=verify,
+    )
 
 
 def run(
@@ -84,6 +227,10 @@ def run(
             ask_use_ledger=budget.ask_use_ledger(cfg.effort),
         )
         plan.goal = original_task.strip()
+        if not plan.summary.strip():
+            plan.summary = stage_summary.plan_summary(
+                {"summary": plan.summary, "approach": plan.approach}
+            )
         if budget.ask_use_ledger(cfg.effort) and plan.use_ledger is None:
             plan.use_ledger = True
         elif not budget.ask_use_ledger(cfg.effort):
@@ -197,6 +344,13 @@ def run(
         else:
             (flame_dir / "act_status.json").unlink(missing_ok=True)
             act_output = act.text.strip() or plan.goal
+
+        _finalize_act_json(
+            flame_dir,
+            cfg.workspace,
+            act_text=act.text,
+            timed_out=act.timed_out,
+        )
 
         log.emit("phase", phase="verify", cycle=cycle)
         progress.phase("verify", cap)
@@ -323,6 +477,120 @@ def _init_factgraph_board(
     return rel
 
 
+def _orchestrator_script(factgraph: Path) -> Path:
+    return factgraph / "scripts" / "orchestrator.py"
+
+
+def _graph_hint(
+    *,
+    factgraph: Path,
+    run_dir: Path,
+    content: str,
+    creator: str,
+    workspace: Path,
+) -> None:
+    orch = _orchestrator_script(factgraph)
+    cmd = [
+        sys.executable,
+        str(orch),
+        "hint",
+        "--run-dir",
+        str(run_dir),
+        "--content",
+        content,
+        "--creator",
+        creator,
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        raise FlameError(f"fact-graph hint failed: {detail}")
+
+
+def _graph_reopen_if_completed(
+    *,
+    factgraph: Path,
+    run_dir: Path,
+    workspace: Path,
+) -> None:
+    board = _read_json_file(run_dir / "board.json")
+    if not board or board.get("status") != "completed":
+        return
+    orch = _orchestrator_script(factgraph)
+    cmd = [
+        sys.executable,
+        str(orch),
+        "reopen",
+        "--run-dir",
+        str(run_dir),
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        raise FlameError(f"fact-graph reopen failed: {detail}")
+
+
+def _graph_run_orchestrator(
+    *,
+    factgraph: Path,
+    run_dir: Path,
+    workspace: Path,
+    extra_budget: float,
+) -> str:
+    orch = _orchestrator_script(factgraph)
+    cmd = [
+        sys.executable,
+        str(orch),
+        "run",
+        "--run-dir",
+        str(run_dir),
+        "--extra-budget",
+        str(extra_budget),
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        raise FlameError(f"fact-graph run failed: {detail}")
+    text = (result.stdout or result.stderr or "").strip()
+    for line in reversed(text.splitlines()):
+        if line.startswith("run 结束: status="):
+            return line.split("status=", 1)[-1].split()[0]
+    board = _read_json_file(run_dir / "board.json")
+    return str((board or {}).get("status") or "unknown")
+
+
+def _read_graph_act_output(workspace: Path, run_dir: Path) -> str:
+    rel = run_dir.relative_to(workspace) if run_dir.is_relative_to(workspace) else run_dir
+    flame_result = workspace / ".flame" / "graph-result.md"
+    if flame_result.is_file():
+        return flame_result.read_text(encoding="utf-8").strip()
+    result_md = run_dir / "RESULT.md"
+    if result_md.is_file():
+        text = result_md.read_text(encoding="utf-8").strip()
+        flame_result.parent.mkdir(parents=True, exist_ok=True)
+        flame_result.write_text(text + "\n", encoding="utf-8")
+        return text
+    return f"fact-graph run finished ({rel})"
+
+
 def _run_plan(
     backend: AgentBackend,
     log: SessionLog,
@@ -351,6 +619,8 @@ def _run_plan(
         log.emit("plan_degraded", reason="no_json")
         return _stub_plan(original_task, ask_use_ledger=ask_use_ledger)
     plan = _plan_from(payload, ask_use_ledger=ask_use_ledger)
+    if not plan.summary.strip():
+        plan.summary = stage_summary.plan_summary(payload if isinstance(payload, dict) else None)
     _write_plan(flame_dir / "plan.json", plan)
     return plan
 
@@ -359,6 +629,8 @@ def _write_plan(path: Path, plan: Plan) -> None:
     dumped: dict[str, Any] = {
         "goal": plan.goal,
         "approach": plan.approach,
+        "summary": plan.summary
+        or stage_summary.plan_summary({"approach": plan.approach}),
         "constraints": plan.constraints,
         "verify_points": plan.verify_points,
     }
@@ -379,6 +651,7 @@ def _run_verify(
     workspace: Path,
     cycle_trace: evidence.ToolTrace,
     act_note: str = "",
+    require_evidence_touch: bool = True,
 ) -> VerifyResult:
     verify_trace = evidence.ToolTrace()
     result = backend.run(
@@ -415,6 +688,7 @@ def _run_verify(
         workspace=workspace,
         trace=cycle_trace,
         fail_open_if_no_trace=bool(act_note),
+        require_evidence_touch=require_evidence_touch,
     )
     _write_verify(path, verify)
     return verify
@@ -426,6 +700,7 @@ def _verify_from_payload(
     workspace: Path | None = None,
     trace: evidence.ToolTrace | None = None,
     fail_open_if_no_trace: bool = False,
+    require_evidence_touch: bool = True,
 ) -> VerifyResult:
     checks = _str_list(payload.get("checks"))
     drift = _str_list(payload.get("drift"))
@@ -446,6 +721,7 @@ def _verify_from_payload(
             workspace=workspace,
             trace=trace,
             fail_open_if_no_trace=fail_open_if_no_trace,
+            require_touch=require_evidence_touch,
         )
         for gap in audit.gaps:
             if gap not in gaps:
@@ -458,7 +734,27 @@ def _verify_from_payload(
         diagnosis = "verify rejected without diagnosis"
     if not evidence_ok and gaps and "evidence" not in diagnosis.lower():
         diagnosis = (diagnosis + "; " if diagnosis else "") + "evidence audit failed: " + gaps[0]
-    retry = True if passed else bool(payload["retry"]) if "retry" in payload else True
+    summary = str(payload.get("summary") or "").strip()
+    if not summary:
+        summary = stage_summary.verify_summary(
+            {
+                "passed": passed,
+                "points_met": points_met,
+                "aligned": aligned,
+                "evidence_ok": evidence_ok,
+                "checks": checks,
+                "diagnosis": diagnosis,
+            }
+        )
+    # Audit is part of verify. Decide retry only after all three legs settle.
+    # retry=false is for "more cycles cannot help" on a finished content judgment;
+    # evidence-only failure means verify is incomplete → keep cycling.
+    if passed:
+        retry = True
+    elif points_met and aligned and not evidence_ok:
+        retry = True
+    else:
+        retry = bool(payload["retry"]) if "retry" in payload else True
     return VerifyResult(
         passed=passed,
         points_met=points_met,
@@ -469,6 +765,7 @@ def _verify_from_payload(
         drift=drift,
         evidence_gaps=gaps,
         diagnosis=diagnosis,
+        summary=summary,
     )
 
 
@@ -481,6 +778,16 @@ def _write_verify(path: Path, verify: VerifyResult) -> None:
                 "aligned": verify.aligned,
                 "evidence_ok": verify.evidence_ok,
                 "retry": verify.retry,
+                "summary": verify.summary
+                or stage_summary.verify_summary(
+                    {
+                        "passed": verify.passed,
+                        "points_met": verify.points_met,
+                        "evidence_ok": verify.evidence_ok,
+                        "checks": verify.checks,
+                        "diagnosis": verify.diagnosis,
+                    }
+                ),
                 "checks": verify.checks,
                 "drift": verify.drift,
                 "evidence_gaps": verify.evidence_gaps,
@@ -493,6 +800,26 @@ def _write_verify(path: Path, verify: VerifyResult) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+def _finalize_act_json(
+    flame_dir: Path,
+    workspace: Path,
+    *,
+    act_text: str = "",
+    timed_out: bool = False,
+    graph_note: str = "",
+) -> None:
+    path = flame_dir / "act.json"
+    payload: dict[str, Any] = _read_json_file(path) or {}
+    if not str(payload.get("summary") or "").strip():
+        payload["summary"] = stage_summary.synthesize_act_summary(
+            workspace,
+            act_text,
+            timed_out=timed_out,
+            graph_note=graph_note,
+        )
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | None:
@@ -541,6 +868,7 @@ def _plan_from(payload: dict[str, Any], *, ask_use_ledger: bool) -> Plan:
         constraints=constraints,
         verify_points=verify_points,
         use_ledger=use_ledger,
+        summary=str(payload.get("summary") or "").strip(),
     )
 
 

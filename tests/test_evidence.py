@@ -3,13 +3,22 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from flame.evidence import ToolTrace, audit_checks, collect_tool_event, extract_handles
+from flame.evidence import (
+    ToolTrace,
+    audit_checks,
+    collect_tool_event,
+    extract_handles,
+    extract_handles_from_check,
+)
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_extract_handles(self) -> None:
+    def test_extract_handles_explicit(self) -> None:
         handles = extract_handles(
-            ["done.txt exists=true", "see https://example.com/a and `pytest -q`"]
+            [
+                "path: done.txt exists=true",
+                "url: https://example.com/a and `pytest -q`",
+            ]
         )
         kinds = {k for k, _ in handles}
         self.assertIn("path", kinds)
@@ -34,14 +43,14 @@ class EvidenceTests(unittest.TestCase):
         trace = ToolTrace(paths={"done.txt"})
         (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
         ok = audit_checks(
-            ["done.txt exists"],
+            ["path: done.txt exists"],
             workspace=workspace,
             trace=trace,
             fail_open_if_no_trace=False,
         )
         self.assertTrue(ok.ok, ok.gaps)
         bad = audit_checks(
-            ["no_such_evidence_file_12345.txt supports the claim"],
+            ["path: no_such_evidence_file_12345.txt supports the claim"],
             workspace=workspace,
             trace=trace,
             fail_open_if_no_trace=False,
@@ -53,7 +62,7 @@ class EvidenceTests(unittest.TestCase):
         workspace = Path(__file__).resolve().parent / ".tmp_evidence"
         workspace.mkdir(exist_ok=True)
         result = audit_checks(
-            ["done.txt exists"],
+            ["path: done.txt exists"],
             workspace=workspace,
             trace=ToolTrace(),
             fail_open_if_no_trace=True,
@@ -66,7 +75,7 @@ class EvidenceTests(unittest.TestCase):
         workspace.mkdir(exist_ok=True)
         url = "https://example.com/"
         missing = audit_checks(
-            [f"docs at {url}"],
+            [f"url: {url}"],
             workspace=workspace,
             trace=ToolTrace(),
             fail_open_if_no_trace=False,
@@ -74,12 +83,77 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(missing.ok)
         self.assertTrue(any("url not touched" in g for g in missing.gaps))
         ok = audit_checks(
-            [f"docs at {url}"],
+            [f"url: {url}"],
             workspace=workspace,
             trace=ToolTrace(urls={url}),
             fail_open_if_no_trace=False,
         )
         self.assertTrue(ok.ok, ok.gaps)
+
+    def test_prose_without_path_label_is_ignored(self) -> None:
+        handles = extract_handles_from_check(
+            "path: run.py exists (Semaphore + BaseException cancel/await cleanup)"
+        )
+        self.assertEqual(handles, [("path", "run.py")])
+        handles2 = extract_handles_from_check("signature tasks/max_concurrent -> None")
+        self.assertEqual(handles2, [])
+
+    def test_normalize_dot_flame_prefix(self) -> None:
+        workspace = Path(__file__).resolve().parent / ".tmp_evidence"
+        dot_flame = workspace / ".flame"
+        dot_flame.mkdir(parents=True, exist_ok=True)
+        (dot_flame / "answer.md").write_text("# ok\n", encoding="utf-8")
+        trace = ToolTrace(paths={".flame/answer.md", "/work/.flame/answer.md"})
+        ok = audit_checks(
+            ["path: .flame/answer.md exists"],
+            workspace=workspace,
+            trace=trace,
+            fail_open_if_no_trace=False,
+        )
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_normalize_app_prefix(self) -> None:
+        workspace = Path(__file__).resolve().parent / ".tmp_evidence"
+        workspace.mkdir(exist_ok=True)
+        (workspace / "re.json").write_text("{}\n", encoding="utf-8")
+        trace = ToolTrace(paths={"re.json"})
+        ok = audit_checks(
+            ["path: app/re.json matches oracle"],
+            workspace=workspace,
+            trace=trace,
+            fail_open_if_no_trace=False,
+        )
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_normalize_absolute_under_workspace(self) -> None:
+        workspace = Path(__file__).resolve().parent / ".tmp_evidence"
+        workspace.mkdir(exist_ok=True)
+        (workspace / "check.py").write_text("ok\n", encoding="utf-8")
+        trace = ToolTrace(paths={"check.py"})
+        ok = audit_checks(
+            [f"path: {workspace / 'check.py'} exists"],
+            workspace=workspace,
+            trace=trace,
+            fail_open_if_no_trace=False,
+        )
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_each_check_must_have_explicit_handle(self) -> None:
+        workspace = Path(__file__).resolve().parent / ".tmp_evidence"
+        workspace.mkdir(exist_ok=True)
+        (workspace / "re.json").write_text("{}\n", encoding="utf-8")
+        trace = ToolTrace(paths={"re.json"})
+        bad = audit_checks(
+            [
+                "path: re.json OK",
+                "oracle passed with no explicit handle",
+            ],
+            workspace=workspace,
+            trace=trace,
+            fail_open_if_no_trace=False,
+        )
+        self.assertFalse(bad.ok)
+        self.assertTrue(any("no explicit handle" in g for g in bad.gaps))
 
 
 if __name__ == "__main__":

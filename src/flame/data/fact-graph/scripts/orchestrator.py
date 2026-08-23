@@ -1515,6 +1515,27 @@ def cmd_hint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reopen(args: argparse.Namespace) -> int:
+    """Re-enable a completed run so hint + run can continue (Proceed / flame continue)."""
+    run_dir = Path(args.run_dir)
+    if not (run_dir / "board.json").exists():
+        print(f"run 目录不存在 board.json: {run_dir}", file=sys.stderr)
+        return 1
+    board = load_board(run_dir)
+    if board["status"] == "completed":
+        board["status"] = "active"
+        board["completed_at"] = None
+        board["completion"] = None
+        save_board(run_dir, board)
+        log("reopen: completed → active run_dir=%s", run_dir)
+    if args.content:
+        add_hint(board, args.content, args.creator)
+        save_board(run_dir, board)
+        log("reopen hint %s", args.content[:80])
+    print(f"run 已 reopen: status={board['status']} run_dir={run_dir}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
     status_path = run_dir / "status.json"
@@ -1568,6 +1589,12 @@ def main() -> int:
     p_hint.add_argument("--content", required=True)
     p_hint.add_argument("--creator", default="human")
     p_hint.set_defaults(func=cmd_hint)
+
+    p_reopen = sub.add_parser("reopen", help="completed run 重新激活以便续跑")
+    p_reopen.add_argument("--run-dir", required=True)
+    p_reopen.add_argument("--content", default="", help="可选: 追加一条 hint")
+    p_reopen.add_argument("--creator", default="proceed")
+    p_reopen.set_defaults(func=cmd_reopen)
 
     p_status = sub.add_parser("status", help="查看 run 状态")
     p_status.add_argument("--run-dir", required=True)

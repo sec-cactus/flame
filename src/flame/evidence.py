@@ -9,10 +9,9 @@ from pathlib import Path
 from typing import Any
 
 _URL_RE = re.compile(r"https?://[^\s\]\"'<>]+", re.I)
-# Paths with a slash or a normal file suffix; also bare names like done.txt
-_PATH_RE = re.compile(
-    r"(?P<p>(?:[\w.-]+/)+[\w.-]+|[\w.-]+\.(?:txt|md|json|py|ts|js|go|rs|toml|yaml|yml|html|csv|log|sh))\b"
-)
+_PATH_TOKEN = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.\w+")
+_PATH_LABEL = re.compile(r"\bpath:\s*[`\"']?([^\s`\"',;)]+)", re.I)
+_URL_LABEL = re.compile(r"\burl:\s*(\S+)", re.I)
 
 
 @dataclass
@@ -79,9 +78,8 @@ def collect_tool_event(event: dict[str, Any], into: ToolTrace) -> None:
 def _ingest_blob(text: str, into: ToolTrace) -> None:
     for url in _URL_RE.findall(text):
         into.urls.add(url.rstrip(").,;]"))
-    for match in _PATH_RE.finditer(text):
-        into.paths.add(match.group("p"))
-    # bare relative tokens already in path-like args
+    for match in _PATH_TOKEN.finditer(text):
+        into.paths.add(match.group(0))
     stripped = text.strip().strip("'\"")
     if stripped and ("/" in stripped or "." in stripped) and " " not in stripped and not stripped.startswith("-"):
         if _URL_RE.match(stripped):
@@ -90,29 +88,48 @@ def _ingest_blob(text: str, into: ToolTrace) -> None:
             into.paths.add(stripped)
 
 
+def extract_handles_from_check(text: str) -> list[tuple[str, str]]:
+    """Explicit handles only: path:, url:, or backtick spans. No prose regex scan."""
+    handles: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, value: str) -> None:
+        value = value.strip().strip("'\"`,;)")
+        if not value:
+            return
+        item = (kind, value)
+        if item not in seen:
+            seen.add(item)
+            handles.append(item)
+
+    for match in _PATH_LABEL.finditer(text):
+        raw = match.group(1).strip()
+        if _PATH_TOKEN.search(raw) or raw.startswith("/"):
+            add("path", raw)
+    for match in _URL_LABEL.finditer(text):
+        add("url", match.group(1).rstrip(").,;]"))
+    for span in re.findall(r"`([^`]+)`", text):
+        body = span.strip()
+        if not body:
+            continue
+        if _URL_RE.match(body):
+            add("url", body.rstrip(").,;]"))
+        elif _PATH_TOKEN.fullmatch(body):
+            add("path", body)
+        else:
+            add("command", " ".join(body.split()))
+    return handles
+
+
 def extract_handles(texts: list[str]) -> list[tuple[str, str]]:
-    """Return (kind, value) handles cited in check strings. kind is path|url|command."""
+    """Flatten explicit handles from all check lines."""
     found: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for text in texts:
-        for url in _URL_RE.findall(text):
-            item = ("url", url.rstrip(").,;]"))
+        for item in extract_handles_from_check(text):
             if item not in seen:
                 seen.add(item)
                 found.append(item)
-        for match in _PATH_RE.finditer(text):
-            item = ("path", match.group("p"))
-            if item not in seen:
-                seen.add(item)
-                found.append(item)
-        # shell-ish tokens: word starting the check after common verbs is too heuristic;
-        # treat backtick or `$ ` command spans lightly
-        for cmd in re.findall(r"`([^`]+)`", text):
-            if cmd.strip():
-                item = ("command", " ".join(cmd.split()))
-                if item not in seen:
-                    seen.add(item)
-                    found.append(item)
     return found
 
 
@@ -128,6 +145,7 @@ def audit_checks(
     workspace: Path,
     trace: ToolTrace,
     fail_open_if_no_trace: bool = True,
+    require_touch: bool = True,
 ) -> AuditResult:
     """
     Audit: cited handles must exist and have been touched this cycle.
@@ -143,32 +161,55 @@ def audit_checks(
             gaps=["evidence audit skipped: no tool trace this cycle (fail-open)"],
         )
 
-    handles = extract_handles(checks)
-    if not handles:
-        return AuditResult(
-            ok=False,
-            gaps=["checks cite no objective handle (path, url, or `command`)"],
-        )
-
-    for kind, value in handles:
-        if kind == "path":
-            gaps.extend(_audit_path(value, workspace, trace))
-        elif kind == "url":
-            gaps.extend(_audit_url(value, trace))
-        elif kind == "command":
-            gaps.extend(_audit_command(value, trace))
+    for check in checks:
+        handles = extract_handles_from_check(check)
+        if not handles:
+            gaps.append("check cites no explicit handle (path:, url:, or `command`)")
+            continue
+        for kind, value in handles:
+            if kind == "path":
+                gaps.extend(_audit_path(value, workspace, trace, require_touch=require_touch))
+            elif kind == "url":
+                gaps.extend(_audit_url(value, trace))
+            elif kind == "command":
+                gaps.extend(_audit_command(value, trace))
 
     return AuditResult(ok=not gaps, gaps=gaps)
 
 
-def _audit_path(path: str, workspace: Path, trace: ToolTrace) -> list[str]:
+def _normalize_path(path: str, workspace: Path) -> str:
+    raw = path.strip().strip("'\"")
+    ws = workspace.resolve()
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve().relative_to(ws).as_posix()
+        except ValueError:
+            pass
+    if raw.startswith("./"):
+        rel = raw[2:]
+    elif raw.startswith("/app/") and (ws / raw[5:]).exists():
+        return raw[5:]
+    else:
+        rel = raw
+    if rel.startswith("app/") and (ws / rel[4:]).exists():
+        return rel[4:]
+    return rel
+
+
+def _audit_path(
+    path: str, workspace: Path, trace: ToolTrace, *, require_touch: bool = True
+) -> list[str]:
+    norm = _normalize_path(path, workspace)
     gaps: list[str] = []
-    touched = _path_touched(path, trace)
-    exists = _path_exists(path, workspace)
+    touched = _path_touched(norm, trace) or (norm != path and _path_touched(path, trace))
+    exists = _path_exists(norm, workspace)
     if not exists:
-        gaps.append(f"path not found: {path}")
-    if not touched:
-        gaps.append(f"path not touched in this cycle's tools: {path}")
+        label = norm if norm == path else f"{path} (as {norm})"
+        gaps.append(f"path not found: {label}")
+    if not touched and require_touch:
+        label = norm if norm == path else f"{path} (as {norm})"
+        gaps.append(f"path not touched in this cycle's tools: {label}")
     return gaps
 
 
@@ -195,7 +236,7 @@ def _path_exists(path: str, workspace: Path) -> bool:
     candidate = Path(path)
     if candidate.is_absolute():
         return candidate.exists()
-    return (workspace / path).exists() or candidate.exists()
+    return (workspace / path).exists()
 
 
 def _path_touched(path: str, trace: ToolTrace) -> bool:

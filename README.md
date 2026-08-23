@@ -105,6 +105,8 @@ print(result.passed, result.output)
 - [`docs/SKILLS.md`](docs/SKILLS.md) — j-space / fact-graph install
 - [`todo.md`](todo.md) — open backlog (mid-run hints / cross-run memory, low priority)
 
+Cluster dispatch (**Flame Fleet**) lives in a separate private repo; not part of this package.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).

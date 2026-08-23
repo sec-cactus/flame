@@ -45,21 +45,27 @@ flame/
   LICENSE
   todo.md            # 开放 backlog（低优项）
   pyproject.toml
-  src/flame/
-    loop.py          # 主循环；plan.goal 强制；max 开图 init
-    evidence.py      # tool trace + checks 句柄审计
-    preprocess.py    # meld / quadrants / factors → brief.json
-    prompts.py
-    budget.py        # effort → 模块开关 + cycle_limit
-    backend.py       # spawn agent + stream-json + timeout
-    types.py         # Brief / Plan / VerifyResult
-    skills.py        # j-space / fact-graph 路径
-    data/fact-graph/ # 打包的 fact-graph skill
+  container/         # flame-worker Docker 镜像
+  src/
+    flame/           # 单机 plan-act-verify 编排
+      loop.py        # 主循环；plan.goal 强制；max 开图 init
+      evidence.py    # tool trace + checks 句柄审计
+      preprocess.py  # meld / quadrants / factors → brief.json
+      prompts.py
+      budget.py      # effort → 模块开关 + cycle_limit
+      backend.py     # spawn agent + stream-json + timeout
+      types.py       # Brief / Plan / VerifyResult
+      skills.py      # j-space / fact-graph 路径
+      stage_summary.py
+      data/fact-graph/
+        ui/          # Cytoscape 黑板 UI（本地 serve.py / 静态导入）
   tests/
     fake_agent.py
 ```
 
-本地试跑目录 `runs/` 不入库。依赖：Python 3.11+ **仅标准库**。运行时要本机 `agent`。
+本地试跑目录 `runs/` 不入库。单机 `flame`：Python 3.11+ **仅标准库** + 本机 `agent`。
+
+集群编排 **Flame Fleet** 在独立私有仓库（`flame-fleet`），不在本库。
 
 工作区 `.flame/` 常见产物：`original.md`、`brief.json`、`plan.json`、`verify.json`、`act_skill.json`、`tool_trace.json`；max 另有 `graph_seed.json`、`graph_run.json`。图本身在 `.fact-graph/runs/flame-act-cN/`。
 
@@ -135,7 +141,7 @@ prompt 第一行：`[Flame phase: meld|quadrants|factors|plan|act|verify]`。
 1. **preprocess**：只写 `brief.json`。任一步失败则该项留空；全空则无 brief。不问用户。
 2. **plan**：冲突优先级 **original > verify > brief**。brief 渲染为标签字段（decisive_move / factors / quadrants / meld_judge），不是整包 JSON。缺 brief 照样规划。**`plan.goal` 恒等于 original**（harness 强制覆盖，禁止代理成功态）。high 写 `use_ledger`（默认 true；短任务或明显多路径可 false）。
 3. **act**：按 original(=goal) / approach / constraints。**high** 且 `use_ledger` → j-space；**max** → fact-graph。harness 写 `.flame/graph_seed.json` 并 `init` 开板（act 只 `run`）：`goal`=original+verify_points，`constraints`=plan.constraints，`origin`=brief+上轮 verify，`hint`=approach。图探索 / Flame verify 质检；board `complete` ≠ Flame 通过。
-4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明与本轮 tool 句柄摘要）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。Harness 对 `checks` 做**证据审计**（`evidence.py`：从 checks 抽 path/url/command；path 须存在且本轮 tool 触及；url/command 只认 trace，**不出站**）。审计失败 → `evidence_ok=false`。不复跑测试、不重做推理。`points_met` 且 `checks` 空 → 亦 `evidence_ok=false`。
+4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明与本轮 tool 句柄摘要）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。Harness 对 `checks` 做**证据审计**（`evidence.py`：每项 check 须含显式 `path:` / `url:` / `` `command` ``；path 做 workspace 归一化；须存在且本轮 tool 触及；url/command 只认 trace，不出站）。审计是 verify 的一环：三项都落定后才采纳 `retry`；仅证据腿失败时强制 `retry=true`。`points_met` 且 `checks` 空 → 亦 `evidence_ok=false`。
 
 ## 8. 降级与退出码
 
@@ -169,6 +175,8 @@ JSONL：`.flame/logs/<session>.jsonl`（`start` / `phase` / `agent_done` / `act_
 
 ```
 flame run "任务" [--effort standard] [--workspace .] [--model auto] [--agent-bin agent] [--safety]
+flame continue "后续指令" [--workspace .] [--model auto] [--extra-budget 900]
+  # max only: read `.flame/graph_run.json`, orchestrator hint+run, then verify (skip preprocess/plan/init/act agent)
 flame skills
 flame version
 ```
@@ -177,3 +185,7 @@ flame version
 from flame import run
 result = run("修复测试", workspace=".", effort="standard")
 ```
+
+## 13. Flame Fleet
+
+集群（SQLite + FastAPI UI + docker node 调度）已拆到 **私有仓库 `flame-fleet`**，依赖本库 `flame` 包与 `container/Dockerfile` 构建的 worker 镜像。协议、UI、graph API 见该库 `docs/FLEET.md`。

@@ -18,6 +18,8 @@ build/
 .mypy_cache/
 .ruff_cache/
 *.zip
+issue.md
+issue-evidence-paths.md
 
 # secrets / local env
 .env

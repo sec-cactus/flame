@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 
 from flame.config import Config
-from flame.loop import FlameError, _plan_from, run
+from flame.loop import FlameError, _plan_from, _verify_from_payload, run
+from flame.evidence import ToolTrace
 from flame.progress import Progress
 from flame.safety import SafetyDenied
 from flame.types import Effort
@@ -326,6 +327,50 @@ class LoopTests(unittest.TestCase):
         self.assertGreaterEqual(result.cycles, 2)
         self.assertIn("evidence_ok=False", buf.getvalue())
         self.assertTrue((workspace / ".flame" / "tool_trace.json").is_file())
+
+    def test_audit_failure_forces_retry_despite_model_false(self) -> None:
+        workspace = self._workspace("audit_retry")
+        (workspace / "run.py").write_text("ok\n", encoding="utf-8")
+        trace = ToolTrace(paths={"run.py"})
+        verify = _verify_from_payload(
+            {
+                "points_met": True,
+                "aligned": True,
+                "evidence_ok": True,
+                "retry": False,
+                "checks": [
+                    "path: run.py exists (cancel/await cleanup)",
+                    "path: no_such_file_zz.txt claimed",
+                ],
+                "drift": [],
+                "evidence_gaps": [],
+                "diagnosis": "",
+            },
+            workspace=workspace,
+            trace=trace,
+        )
+        self.assertFalse(verify.passed)
+        self.assertFalse(verify.evidence_ok)
+        self.assertTrue(verify.retry)
+        self.assertNotIn("cancel/await", " ".join(verify.evidence_gaps))
+
+    def test_content_failure_keeps_model_retry_false(self) -> None:
+        verify = _verify_from_payload(
+            {
+                "points_met": False,
+                "aligned": True,
+                "evidence_ok": True,
+                "retry": False,
+                "checks": [],
+                "drift": [],
+                "evidence_gaps": [],
+                "diagnosis": "not implementable",
+            },
+            workspace=self._workspace("content_retry"),
+            trace=ToolTrace(),
+        )
+        self.assertFalse(verify.passed)
+        self.assertFalse(verify.retry)
 
     def test_verify_drift_steers_replan(self) -> None:
         os.environ["FLAME_FAKE_DRIFT"] = "1"

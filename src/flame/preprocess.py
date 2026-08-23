@@ -54,12 +54,13 @@ def _build_brief(
         brief.judge = judge_obj
 
     brief.quadrants = _quadrants(backend, log, progress, task, judge_text)
-    success, failure, move = _factors(
+    success, failure, move, summary = _factors(
         backend, log, progress, task, brief.quadrants, judge_text
     )
     brief.success_factors = success
     brief.failure_factors = failure
     brief.decisive_move = move
+    brief.summary = summary or move
 
     if brief.empty():
         progress.fail("preprocess produced nothing, using original")
@@ -149,7 +150,7 @@ def _factors(
     task: str,
     quadrants: dict[str, list[str]],
     judge_json: str,
-) -> tuple[list[str], list[str], str]:
+) -> tuple[list[str], list[str], str, str]:
     progress.note("factors")
     qtext = json.dumps(quadrants, ensure_ascii=False, indent=2)
     result = backend.run(
@@ -167,10 +168,12 @@ def _factors(
         progress.fail("factors JSON missing; brief keeps quadrants only")
         return [], [], ""
     move = str(payload.get("decisive_move") or "").strip()
+    summary = str(payload.get("summary") or move).strip()
     return (
         _str_list(payload.get("success_factors"), cap=3),
         _str_list(payload.get("failure_factors"), cap=3),
         move,
+        summary,
     )
 
 

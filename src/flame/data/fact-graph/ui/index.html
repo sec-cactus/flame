@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fact-graph 黑板视图</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<script src="vendor/tailwindcss.js"></script>
+<script src="vendor/dagre.min.js"></script>
+<script src="vendor/cytoscape.min.js"></script>
+<script src="vendor/cytoscape-dagre.js"></script>
+<script src="vendor/klay.js"></script>
+<script src="vendor/cytoscape-klay.js"></script>
+<script src="vendor/elk.bundled.js"></script>
+<script src="vendor/cytoscape-elk.js"></script>
+<script defer src="vendor/alpine.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  #cy { width: 100%; height: 100%; }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  .timeline-flash { animation: timelineFlash 1s ease-out; }
+  @keyframes timelineFlash { 0% { background: #e0f2fe; } 100% { background: transparent; } }
+  .replay-beacon { animation: replayPulse 1.8s ease-out infinite; }
+  @keyframes replayPulse { 0% { box-shadow: 0 0 0 0 rgba(139,92,246,.45); } 100% { box-shadow: 0 0 0 8px rgba(139,92,246,0); } }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+<div x-data="fgApp()" x-init="init()" class="h-screen flex flex-col overflow-hidden">
+
+  <!-- 顶栏 -->
+  <header class="h-12 shrink-0 flex items-center gap-3 px-3 bg-white border-b border-slate-200">
+    <div class="flex items-center gap-2 min-w-0">
+      <span class="text-base font-bold whitespace-nowrap">fact-graph</span>
+      <span class="text-[11px] px-2 py-0.5 rounded-full"
+            :class="mode==='server' ? 'bg-emerald-50 text-emerald-600 border border-emerald-200' : 'bg-slate-100 text-slate-500 border border-slate-200'"
+            x-text="mode==='server' ? '服务器模式' : '静态模式'"></span>
+    </div>
+
+    <template x-if="run">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="text-sm font-medium truncate max-w-[240px]" x-text="run.title"></span>
+        <span class="text-[11px] px-2 py-0.5 rounded-full whitespace-nowrap font-medium"
+              :class="statusBadgeClass(run.status)" x-text="statusLabel(run.status)"></span>
+      </div>
+    </template>
+
+    <div class="flex-1"></div>
+
+    <template x-if="run">
+      <div class="flex items-center gap-2">
+        <select x-model="layoutMode" @change="relayout()"
+                class="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-100">
+          <option value="dagre_tb">dagre 上下</option>
+          <option value="dagre_lr">dagre 左右</option>
+          <option value="klay_tb">klay 上下</option>
+          <option value="klay_lr">klay 左右</option>
+          <option value="elk_tb">elk 上下</option>
+          <option value="elk_lr">elk 左右</option>
+        </select>
+        <template x-if="mode==='server'">
+          <label class="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+            <input type="checkbox" x-model="polling" @change="togglePolling()" class="accent-indigo-500">
+            自动刷新
+          </label>
+        </template>
+        <template x-if="mode==='static'">
+          <button @click="importFiles()" class="h-7 px-2.5 rounded-md bg-indigo-600 text-white text-xs hover:bg-indigo-700 transition">导入 board.json</button>
+        </template>
+      </div>
+    </template>
+    <template x-if="!run">
+      <div class="flex items-center gap-2">
+        <template x-if="mode==='static'">
+          <button @click="importFiles()" class="h-7 px-2.5 rounded-md bg-indigo-600 text-white text-xs hover:bg-indigo-700 transition">导入 board.json</button>
+        </template>
+      </div>
+    </template>
+  </header>
+
+  <!-- 主体 -->
+  <div class="flex-1 flex min-h-0">
+
+    <!-- 左侧 run 列表 -->
+    <aside class="w-56 shrink-0 bg-white border-r border-slate-200 flex flex-col min-h-0">
+      <div class="px-3 py-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wide flex items-center justify-between">
+        <span>Runs</span>
+        <template x-if="mode==='static'">
+          <span class="flex gap-1">
+            <button @click="importFiles()" title="导入一个或多个 board.json" class="text-indigo-500 hover:text-indigo-700 text-xs border border-indigo-200 rounded px-1.5">文件</button>
+            <button @click="importDir()" title="导入整个 run 目录(含 events/RESULT/config)" class="text-indigo-500 hover:text-indigo-700 text-xs border border-indigo-200 rounded px-1.5">目录</button>
+          </span>
+        </template>
+      </div>
+      <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
+        <template x-if="runs.length===0">
+          <div class="text-xs text-slate-400 px-1 py-3 leading-5">
+            <template x-if="mode==='static'">点击"+ 导入"或把 board.json 拖进页面<br>(选择目录可一并读入 events/RESULT/config)</template>
+            <template x-if="mode==='server'">当前 runs 目录下还没有 run<br>编排器 init 后会自动出现</template>
+          </div>
+        </template>
+        <template x-for="r in runs" :key="r.id">
+          <button @click="selectRun(r.id)"
+                  class="w-full text-left rounded-lg px-2 py-1.5 border transition"
+                  :class="currentRunId===r.id ? 'border-indigo-300 bg-indigo-50' : 'border-transparent hover:bg-slate-50'">
+            <div class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full shrink-0" :class="statusDotClass(r.status)"></span>
+              <span class="text-xs font-medium truncate" x-text="r.title"></span>
+            </div>
+            <div class="text-[10px] text-slate-400 mt-0.5 truncate">
+              <span x-text="`${r.facts} facts / ${r.intents_concluded} 结论 / ${r.intents_open} 进行中`"></span>
+              <template x-if="r.hints>0"><span x-text="` / ${r.hints} hints`"></span></template>
+            </div>
+            <template x-if="r.id===currentRunId && pollError">
+              <div class="text-[10px] text-rose-500 mt-0.5" x-text="pollError"></div>
+            </template>
+          </button>
+        </template>
+      </div>
+    </aside>
+
+    <!-- 图 -->
+    <main class="flex-1 min-w-0 relative bg-slate-100">
+      <div id="cy" x-cloak></div>
+      <template x-if="!run">
+        <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div class="text-center text-slate-400 pointer-events-auto max-w-sm">
+            <div class="text-lg font-medium mb-1">从左侧选择一个 run</div>
+            <div class="text-xs leading-5">
+              静态模式: 点"+ 导入"或直接把 board.json 拖进页面; 用 &lt;input webkitdirectory&gt; 选整个 run 目录可顺带读入 events.jsonl / RESULT.md / config.toml。<br>
+              服务器模式: <code class="bg-slate-200 px-1 rounded">python3 ui/serve.py</code> 后自动列出 runs 目录, 支持轮询刷新与 hint 注入。
+            </div>
+          </div>
+        </div>
+      </template>
+      <template x-if="run">
+        <div class="absolute left-3 bottom-3 bg-white/90 backdrop-blur rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-500 shadow-sm pointer-events-none">
+          <span x-text="`${nodeCount} 节点 · ${edgeCount} 边 · reason ${run.reason_rounds ?? 0} 轮`"></span>
+        </div>
+      </template>
+    </main>
+
+    <!-- 右侧栏 -->
+    <aside class="shrink-0 bg-white border-l border-slate-200 flex flex-col min-h-0" :style="`width:${sidePanelWidth}px`">
+      <template x-if="!run">
+        <div class="p-4 text-xs text-slate-400">选择 run 后显示详情</div>
+      </template>
+      <template x-if="run">
+        <div class="flex flex-col min-h-0 h-full">
+          <!-- tab 头 -->
+          <div class="flex border-b border-slate-200 text-xs shrink-0">
+            <button class="flex-1 py-2 text-center font-medium transition" :class="sideTab==='detail'?'text-indigo-600 border-b-2 border-indigo-500':'text-slate-400 hover:text-slate-600'"
+                    @click="sideTab='detail'">详情</button>
+            <button class="flex-1 py-2 text-center font-medium transition" :class="sideTab==='timeline'?'text-indigo-600 border-b-2 border-indigo-500':'text-slate-400 hover:text-slate-600'"
+                    @click="sideTab='timeline'">时间线</button>
+            <button class="flex-1 py-2 text-center font-medium transition" :class="sideTab==='replay'?'text-indigo-600 border-b-2 border-indigo-500':'text-slate-400 hover:text-slate-600'"
+                    @click="sideTab='replay'">回放</button>
+            <button class="flex-1 py-2 text-center font-medium transition" :class="sideTab==='result'?'text-indigo-600 border-b-2 border-indigo-500':'text-slate-400 hover:text-slate-600'"
+                    @click="sideTab='result'">结果</button>
+            <button class="flex-1 py-2 text-center font-medium transition" :class="sideTab==='hint'?'text-indigo-600 border-b-2 border-indigo-500':'text-slate-400 hover:text-slate-600'"
+                    @click="sideTab='hint'">Hint</button>
+          </div>
+          <div class="flex-1 overflow-y-auto min-h-0">
+
+            <!-- 详情 -->
+            <div x-show="sideTab==='detail'" x-cloak class="p-3 space-y-3 text-xs">
+              <template x-if="selectedNode">
+                <div class="rounded-lg border border-slate-200 p-2.5">
+                  <div class="flex items-center justify-between gap-2 mb-1.5">
+                    <span class="font-semibold text-sm" x-text="selectedNode.id"></span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="nodeBadgeClass(selectedNode)" x-text="nodeTypeLabel(selectedNode)"></span>
+                  </div>
+                  <div class="text-slate-600 leading-5 break-words" x-text="selectedNode.description"></div>
+                  <div class="mt-2 space-y-1 text-slate-400 text-[11px]">
+                    <div x-show="selectedNode.source"><span class="inline-block w-14 text-slate-300">来源</span><span x-text="selectedNode.source"></span></div>
+                    <div x-show="selectedNode.created_at"><span class="inline-block w-14 text-slate-300">创建</span><span x-text="selectedNode.created_at"></span></div>
+                    <div x-show="selectedNode.worker"><span class="inline-block w-14 text-slate-300">worker</span><span x-text="selectedNode.worker"></span></div>
+                    <div x-show="selectedNode.concluded_at"><span class="inline-block w-14 text-slate-300">结论</span><span x-text="selectedNode.concluded_at"></span></div>
+                    <div x-show="selectedNode.edgeFrom"><span class="inline-block w-14 text-slate-300">from</span><span x-text="selectedNode.edgeFrom"></span></div>
+                  </div>
+                </div>
+              </template>
+              <div x-show="selectedNode===null" class="text-slate-400">点击图中的节点或边查看详情</div>
+
+              <div class="rounded-lg border border-slate-200 p-2.5">
+                <div class="font-semibold mb-1.5">Run 信息</div>
+                <div class="space-y-1 text-slate-500">
+                  <div class="flex justify-between"><span class="text-slate-300">状态</span><span :class="'font-medium '+statusTextClass(run.status)" x-text="statusLabel(run.status)"></span></div>
+                  <div class="flex justify-between"><span class="text-slate-300">Facts</span><span x-text="run.facts.length"></span></div>
+                  <div class="flex justify-between"><span class="text-slate-300">Intents</span><span x-text="`${run.intents.filter(i=>i.to).length} 结论 / ${run.intents.filter(i=>!i.to).length} 未结论`"></span></div>
+                  <div class="flex justify-between"><span class="text-slate-300">Hints</span><span x-text="run.hints.length"></span></div>
+                  <div class="flex justify-between"><span class="text-slate-300">reason 轮次</span><span x-text="run.reason_rounds ?? 0"></span></div>
+                  <div class="flex justify-between"><span class="text-slate-300">bootstrap</span><span x-text="run.bootstrap_enabled ? '启用' : '禁用'"></span></div>
+                  <div class="flex justify-between"><span class="text-slate-300">创建</span><span x-text="run.created_at"></span></div>
+                  <div x-show="run.completed_at" class="flex justify-between"><span class="text-slate-300">完成</span><span x-text="run.completed_at"></span></div>
+                </div>
+              </div>
+
+              <div class="rounded-lg border border-slate-200 p-2.5">
+                <div class="font-semibold mb-1.5">完成结论</div>
+                <template x-if="run.completion">
+                  <div>
+                    <div class="text-slate-600 leading-5" x-text="run.completion.description"></div>
+                    <div class="mt-1 text-slate-400 text-[11px]">支撑 facts: <span class="font-medium text-indigo-600" x-text="run.completion.from.join(', ')"></span> · worker: <span x-text="run.completion.worker"></span></div>
+                  </div>
+                </template>
+                <template x-if="!run.completion">
+                  <div class="text-slate-400" x-text="run.status==='budget_exceeded' ? '预算耗尽收尾, 无完成结论' : '尚无完成结论'"></div>
+                </template>
+              </div>
+
+              <div class="rounded-lg border border-slate-200 p-2.5">
+                <div class="font-semibold mb-1.5">Hints <span class="text-slate-300 font-normal" x-text="`(${run.hints.length})`"></span></div>
+                <div class="space-y-1.5">
+                  <template x-for="h in run.hints" :key="h.id">
+                    <div class="text-slate-600 leading-5 border-l-2 border-amber-300 pl-2">
+                      <span class="text-slate-300 text-[10px]" x-text="`${h.id} · ${h.creator} · ${h.created_at}`"></span><br>
+                      <span x-text="h.content"></span>
+                    </div>
+                  </template>
+                  <div x-show="run.hints.length===0" class="text-slate-400">无 hint</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 时间线 -->
+            <div x-show="sideTab==='timeline'" x-cloak class="p-3">
+              <div class="text-[11px] text-slate-400 mb-2" x-text="timelineSourceLabel"></div>
+              <div class="space-y-1">
+                <template x-for="(entry, idx) in timelineEvents()" :key="entry.id">
+                  <div class="flex items-start gap-2.5" :id="'tl-'+entry.id">
+                    <div class="w-2.5 h-2.5 rounded-full mt-1.5 shrink-0" :class="timelineDotClass(entry)"></div>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2">
+                        <span class="text-[10px] text-slate-300 whitespace-nowrap" x-text="entry.time"></span>
+                        <span class="text-[10px] px-1.5 py-px rounded-full whitespace-nowrap" :class="timelineBadgeClass(entry)" x-text="entry.badge"></span>
+                        <span class="text-slate-300 text-[10px] truncate" x-text="entry.worker || entry.creator || ''"></span>
+                      </div>
+                      <div class="text-xs text-slate-600 leading-5 break-words mt-0.5" x-text="entry.text"></div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- 回放 -->
+            <div x-show="sideTab==='replay'" x-cloak class="p-3 space-y-3">
+              <div class="flex items-center gap-2">
+                <button @click="replayToggle()" class="h-8 w-8 rounded-md border border-violet-200 text-violet-600 hover:bg-violet-50 transition flex items-center justify-center" title="播放/暂停">
+                  <svg x-show="!replay.playing" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></svg>
+                  <svg x-show="replay.playing" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 6h3v12H8zM13 6h3v12h-3z"/></svg>
+                </button>
+                <button @click="replayRestart()" class="h-8 w-8 rounded-md border border-violet-200 text-violet-600 hover:bg-violet-50 transition flex items-center justify-center" title="重头播放">
+                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V2L7 6l5 4V7c3.3 0 6 2.7 6 6s-2.7 6-6 6-6-2.7-6-6H4c0 4.4 3.6 8 8 8s8-3.6 8-8-3.6-8-8-8z"/></svg>
+                </button>
+                <select x-model="replay.stepMs" class="h-8 rounded-md border border-slate-200 bg-white px-1.5 text-xs focus:outline-none">
+                  <option value="2400">慢</option><option value="1400">中</option><option value="700">快</option>
+                </select>
+                <span class="text-xs text-slate-400 ml-auto" x-text="`${replay.frameIndex+1} / ${replay.frames.length}`"></span>
+              </div>
+              <div>
+                <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div class="h-full bg-violet-500 transition-all" :style="`width:${replay.frames.length? (replay.frameIndex+1)/replay.frames.length*100:0}%`"></div>
+                </div>
+                <div class="text-[11px] text-slate-400 mt-1.5 h-4 truncate" x-text="replay.currentEventText"></div>
+              </div>
+              <div class="text-[11px] text-slate-400 leading-5">
+                按事件顺序重放图生长过程。数据源: <span x-text="timelineSourceLabel"></span>
+              </div>
+            </div>
+
+            <!-- 结果 / 配置 -->
+            <div x-show="sideTab==='result'" x-cloak class="p-3 space-y-3">
+              <div class="rounded-lg border border-slate-200 overflow-hidden">
+                <div class="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500">RESULT.md</div>
+                <pre class="p-2.5 text-[11px] leading-5 text-slate-600 whitespace-pre-wrap break-words max-h-72 overflow-y-auto" x-text="run.resultText || '无 RESULT.md'"></pre>
+              </div>
+              <div class="rounded-lg border border-slate-200 overflow-hidden">
+                <div class="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500">config.toml (workers / 预算)</div>
+                <pre class="p-2.5 text-[11px] leading-5 text-slate-600 whitespace-pre-wrap break-words max-h-72 overflow-y-auto" x-text="run.configText || '无 config.toml'"></pre>
+              </div>
+            </div>
+
+            <!-- hint 注入 -->
+            <div x-show="sideTab==='hint'" x-cloak class="p-3">
+              <template x-if="mode==='server'">
+                <div class="space-y-2.5">
+                  <div class="text-xs text-slate-500 leading-5">hint 会被追加到 <code class="bg-slate-100 px-1 rounded">inbox.jsonl</code>, 编排器下一拍吸收入图, 影响后续 reason / explore。</div>
+                  <textarea x-model="hintForm.content" rows="4" placeholder="例如: 优先验证缓存一致性方向; 不要重复探索已排除的 X 路径"
+                            class="w-full rounded-lg border border-slate-200 p-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-100"></textarea>
+                  <div class="flex items-center gap-2">
+                    <input x-model="hintForm.creator" placeholder="creator (默认 human)"
+                           class="flex-1 rounded-lg border border-slate-200 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-100">
+                    <button @click="submitHint()" :disabled="!hintForm.content.trim() || sendingHint"
+                            class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs hover:bg-indigo-700 disabled:opacity-40 transition"
+                            x-text="sendingHint ? '写入中…' : '写入 hint'"></button>
+                  </div>
+                  <div x-show="hintHistory.length" class="space-y-1.5 pt-1">
+                    <div class="text-[11px] font-semibold text-slate-400">本会话已注入</div>
+                    <template x-for="(h, idx) in hintHistory" :key="idx">
+                      <div class="text-xs text-slate-600 border-l-2 border-amber-300 pl-2 leading-5" x-text="h.content"></div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+              <template x-if="mode==='static'">
+                <div class="text-xs text-slate-500 leading-6">
+                  hint 注入需要写 <code class="bg-slate-100 px-1 rounded">inbox.jsonl</code>, 浏览器在 file:// 下无法写文件。
+                  请改用服务器模式:<br>
+                  <code class="bg-slate-100 px-1.5 rounded text-[11px]">python3 ui/serve.py</code><br>
+                  然后通过 http://127.0.0.1:8720 打开页面。
+                </div>
+              </template>
+            </div>
+
+          </div>
+        </div>
+      </template>
+    </aside>
+  </div>
+
+  <!-- toast -->
+  <div class="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 transition" x-show="toast.show" x-transition>
+    <div class="px-4 py-2 rounded-lg shadow-lg text-sm"
+         :class="toast.type==='error' ? 'bg-rose-600 text-white' : toast.type==='ok' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-white'"
+         x-text="toast.message"></div>
+  </div>
+  <input type="file" accept=".json,application/json" multiple x-ref="boardInput" x-cloak class="hidden" @change="onImportInput($event)">
+  <input type="file" webkitdirectory x-ref="dirInput" x-cloak class="hidden" @change="onImportInput($event)">
+</div>
+
+<script>
+function fgApp() {
+  const STATUS_LABELS = { active: '进行中', stopped: '已停止', completed: '已完成', budget_exceeded: '预算耗尽' };
+  const STATUS_BADGE = {
+    active: 'bg-emerald-50 text-emerald-600 border border-emerald-200',
+    stopped: 'bg-slate-100 text-slate-500 border border-slate-200',
+    completed: 'bg-indigo-50 text-indigo-600 border border-indigo-200',
+    budget_exceeded: 'bg-rose-50 text-rose-600 border border-rose-200',
+  };
+  const STATUS_DOT = {
+    active: 'bg-emerald-500', stopped: 'bg-slate-300', completed: 'bg-indigo-500', budget_exceeded: 'bg-rose-400',
+  };
+  const STATUS_TEXT = {
+    active: 'text-emerald-600', stopped: 'text-slate-500', completed: 'text-indigo-600', budget_exceeded: 'text-rose-600',
+  };
+
+  return {
+    mode: location.protocol === 'file:' ? 'static' : 'server',
+    runs: [], currentRunId: null, run: null,
+    cy: null, sideTab: 'detail', sidePanelWidth: 320,
+    selectedNode: null, layoutMode: 'dagre_tb',
+    polling: true, pollTimer: null, pollError: '',
+    hintForm: { content: '', creator: 'human' }, sendingHint: false, hintHistory: [],
+    toast: { show: false, message: '', type: 'info' },
+    replay: { playing: false, frameIndex: -1, stepMs: '1400', frames: [], timer: null, currentEventText: '' },
+    timelineSource: 'derived',
+
+    // ───────────────────────── 初始化 ─────────────────────────
+    async init() {
+      this.attachDrop();
+      if (this.mode === 'server') {
+        try { await this.refreshRuns(); } catch (e) { this.toastMsg('服务器 API 不可用, 请在运行中的编排器旁启动 serve.py', 'error'); }
+        this.startPolling();
+      }
+      window.addEventListener('beforeunload', () => { if (this.replay.timer) clearInterval(this.replay.timer); });
+    },
+
+    toastMsg(message, type = 'info') {
+      this.toast = { show: true, message, type };
+      setTimeout(() => this.toast.show = false, 3200);
+    },
+
+    // ───────────────────────── 数据层: 服务器模式 ─────────────────────────
+    async api(path, opts) {
+      const r = await fetch(path, opts);
+      if (!r.ok) {
+        let detail = '';
+        try { detail = (await r.json()).detail || ''; } catch (e) {}
+        throw new Error(detail || `HTTP ${r.status}`);
+      }
+      return r.json();
+    },
+    async fetchText(path) {
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    },
+
+    async refreshRuns() {
+      const list = await this.api('/api/runs');
+      this.runs = list;
+      if (!this.currentRunId && list.length) await this.selectRun(list[0].id);
+      else if (this.currentRunId) {
+        const still = list.find(r => r.id === this.currentRunId);
+        if (still && this.run && this.summaryChanged(still, this._lastSummary)) {
+          this._lastSummary = still;
+          await this.loadRun(this.currentRunId, { incremental: true });
+        }
+        if (!still) this.currentRunId = null;
+      }
+    },
+
+    summaryChanged(a, b) {
+      if (!b) return true;
+      return a.facts !== b.facts || a.intents_open !== b.intents_open
+        || a.intents_concluded !== b.intents_concluded || a.hints !== b.hints
+        || a.status !== b.status;
+    },
+
+    async loadRun(id, { incremental = false } = {}) {
+      const [board, eventsText, resultText, configText] = await Promise.all([
+        this.api(`/api/runs/${id}/board`),
+        this.fetchText(`/api/runs/${id}/events`).catch(() => ''),
+        this.fetchText(`/api/runs/${id}/result`).catch(() => ''),
+        this.fetchText(`/api/runs/${id}/config`).catch(() => ''),
+      ]);
+      board.resultText = resultText;
+      board.configText = configText;
+      this.applyRun(board, eventsText, incremental);
+    },
+
+    async submitHint() {
+      const content = this.hintForm.content.trim();
+      if (!content || this.sendingHint) return;
+      this.sendingHint = true;
+      try {
+        const res = await this.api(`/api/runs/${this.currentRunId}/hint`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content, creator: this.hintForm.creator.trim() || 'human' }),
+        });
+        this.hintHistory.unshift(res.hint);
+        this.hintForm.content = '';
+        this.toastMsg('hint 已写入 inbox.jsonl', 'ok');
+      } catch (e) { this.toastMsg(`hint 写入失败: ${e.message}`, 'error'); }
+      finally { this.sendingHint = false; }
+    },
+
+    startPolling() {
+      if (this.pollTimer) return;
+      this.pollTimer = setInterval(() => {
+        if (!this.polling) return;
+        if (this.replay.playing) return; // 回放演示期间不刷新
+        this.refreshRuns().catch(e => { this.pollError = e.message; });
+      }, 5000);
+    },
+    togglePolling() {
+      if (this.polling) { clearInterval(this.pollTimer); this.pollTimer = null; }
+      else this.startPolling();
+    },
+
+    // ───────────────────────── 数据层: 静态导入 ─────────────────────────
+    importFiles() {
+      this.$refs.boardInput.click();
+    },
+    importDir() {
+      this.$refs.dirInput.click();
+    },
+
+    async onImportInput(ev) {
+      // webkitdirectory 下 File 带 webkitRelativePath(目录相对路径), 据此还原目录结构
+      const files = Array.from(ev.target.files || []).map(f => ({
+        name: f.webkitRelativePath ? f.webkitRelativePath.split('/').pop() : f.name,
+        path: f.webkitRelativePath || '/' + f.name,
+        file: f,
+      }));
+      ev.target.value = '';
+      await this.ingestFiles(files);
+    },
+
+    // 拖拽: 兼容单文件与目录(webkitGetAsEntry 递归)。entry.file/readEntries 都是
+    // 异步回调式 API, 必须全部收集完成后再 ingest, 否则拿到空列表。
+    attachDrop() {
+      const zone = document.body;
+      zone.addEventListener('dragover', e => e.preventDefault());
+      zone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        const files = [];
+        const walk = async (entry) => {
+          if (entry.isFile) {
+            const f = await new Promise(res => entry.file(res));
+            files.push({ name: f.name, path: entry.fullPath, file: f });
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            let batch;
+            do {
+              batch = await new Promise(res => reader.readEntries(res));
+              for (const child of batch) await walk(child);
+            } while (batch.length > 0); // readEntries 可能分批返回
+          }
+        };
+        for (const item of e.dataTransfer.items || []) {
+          const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+          if (entry) await walk(entry);
+          else { const f = item.getAsFile(); if (f) files.push({ name: f.name, path: '/' + f.name, file: f }); }
+        }
+        if (!files.length) return;
+        await this.ingestFiles(files);
+      });
+    },
+
+    async ingestFiles(fileList) {
+      const byDir = new Map(); // dirPath -> {files:[], name}
+      for (const f of fileList) {
+        const parts = (f.path || '/' + f.name).split('/').filter(Boolean);
+        const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '/';
+        const name = parts[parts.length - 1];
+        if (!byDir.has(dir)) byDir.set(dir, { name: parts[0] || '', files: [] });
+        byDir.get(dir).files.push({ name, file: f.file });
+      }
+      let imported = 0;
+      for (const [dir, group] of byDir) {
+        const boardFile = group.files.find(f => f.name === 'board.json');
+        if (!boardFile) continue;
+        try {
+          const board = JSON.parse(await boardFile.file.text());
+          const companion = (name) => group.files.find(f => f.name === name);
+          const readCompanion = async (name) => companion(name) ? await companion(name).file.text() : '';
+          const id = dir === '/' ? (boardFile.name === 'board.json' ? `导入-${imported}` : boardFile.name) : dir.split('/').pop();
+          board.resultText = await readCompanion('RESULT.md');
+          board.configText = await readCompanion('config.toml');
+          const eventsText = await readCompanion('events.jsonl');
+          this.applyRun(board, eventsText, false, id);
+          imported++;
+        } catch (e) {
+          this.toastMsg(`解析 ${boardFile.name} 失败: ${e.message}`, 'error');
+        }
+      }
+      if (imported) this.toastMsg(`已导入 ${imported} 个 run`, 'ok');
+    },
+
+    // ───────────────────────── 图数据构建 ─────────────────────────
+    applyRun(board, eventsText, incremental = false, forcedId = null) {
+      this.run = board;
+      const id = forcedId || this.currentRunId;
+      if (id !== this.currentRunId) this.currentRunId = id;
+      this.selectedNode = null;
+      this.timelineSource = eventsText ? 'events' : 'derived';
+      this._rawEventsText = eventsText;
+      const summary = {
+        id, title: board.title, status: board.status,
+        facts: board.facts.length,
+        intents_concluded: board.intents.filter(i => i.to).length,
+        intents_open: board.intents.filter(i => !i.to).length,
+        hints: board.hints.length,
+      };
+      const existing = this.runs.find(r => r.id === id);
+      if (existing) Object.assign(existing, summary);
+      else this.runs.unshift(summary);
+      const entry = this.runs.find(r => r.id === id);
+      entry._board = board;
+      entry._eventsText = eventsText;
+      if (!this.cy) this.initGraph();
+      this.updateGraph({ fit: !incremental });
+      this.buildReplayFrames();
+    },
+
+    buildElements() {
+      const nodes = [], edges = [];
+      for (const f of this.run.facts) {
+        const nodeType = f.id === 'origin' ? 'origin' : f.id === 'goal' ? 'goal' : 'fact';
+        nodes.push({ data: {
+          id: f.id, label: this.factLabel(f), description: f.description,
+          nodeType, source: f.source, created_at: f.created_at,
+          width: this.factWidth(f.description, nodeType),
+          height: nodeType === 'fact' ? 34 : 38,
+        }});
+      }
+      for (const intent of this.run.intents) {
+        if (intent.to) {
+          for (const src of intent.from) {
+            edges.push({ data: {
+              id: `${intent.id}_${src}`, source: src, target: intent.to,
+              intentId: intent.id, label: intent.description, status: 'concluded',
+            }});
+          }
+        } else {
+          const st = this.intentState(intent);
+          nodes.push({ data: {
+            id: `_ph_${intent.id}`, label: this.isBootstrap(intent) ? 'Bootstrap' : '?',
+            description: intent.description, nodeType: st,
+            intentId: intent.id, worker: intent.worker, created_at: intent.created_at,
+            width: this.isBootstrap(intent) ? 82 : 24, height: this.isBootstrap(intent) ? 30 : 24,
+          }});
+          for (const src of intent.from) {
+            edges.push({ data: {
+              id: `${intent.id}_${src}`, source: src, target: `_ph_${intent.id}`,
+              intentId: intent.id, label: intent.description, status: st,
+            }});
+          }
+          if (this.isBootstrap(intent)) {
+            edges.push({ data: { id: `${intent.id}_goal`, source: `_ph_${intent.id}`, target: 'goal',
+              intentId: intent.id, label: '', status: st, edgeType: 'bootstrap_scope' }});
+          }
+        }
+      }
+      // 完成结论合成一条到 goal 的边
+      if (this.run.completion) {
+        for (const src of this.run.completion.from) {
+          edges.push({ data: {
+            id: `completion_${src}`, source: src, target: 'goal',
+            intentId: null, label: '完成', status: 'completion',
+          }});
+        }
+      }
+      return { nodes, edges };
+    },
+
+    isBootstrap(i) { return i.description === 'bootstrap' && i.creator === 'dispatcher.bootstrap'; },
+    intentState(i) {
+      if (this.isBootstrap(i)) return i.worker ? 'bootstrap_running' : 'bootstrap_pending';
+      return i.worker ? 'in_progress' : 'unclaimed';
+    },
+    factLabel(f) {
+      if (f.id === 'origin') return 'Origin';
+      if (f.id === 'goal') return 'Goal';
+      const t = f.description.replace(/\s+/g, ' ').trim();
+      return t.length <= 24 ? (t || f.id) : Array.from(t).slice(0, 24).join('') + '…';
+    },
+    factWidth(text, nodeType) {
+      const chars = Array.from((text || '').replace(/\s+/g, ' ').trim()).length;
+      if (nodeType === 'fact') return Math.min(176, Math.max(56, Math.ceil(chars * 7.2) + 22));
+      return Math.min(140, Math.max(60, Math.ceil(chars * 8) + 20));
+    },
+
+    // ───────────────────────── 图渲染 ─────────────────────────
+    graphStyles() {
+      const common = { 'text-valign': 'center', 'text-halign': 'center',
+        'font-family': '-apple-system,BlinkMacSystemFont,Inter,sans-serif' };
+      return [
+        { selector: 'node[nodeType="origin"]', style: { ...common, shape: 'round-rectangle', 'background-color': '#14b8a6', label: 'data(label)', color: '#fff', 'font-size': '11px', 'font-weight': 'bold', 'text-wrap': 'wrap', 'text-max-width': '120px', 'text-overflow-wrap': 'anywhere', width: 'data(width)', height: 38, 'border-width': 0 }},
+        { selector: 'node[nodeType="goal"]', style: { ...common, shape: 'round-rectangle', 'background-color': '#f43f5e', label: 'data(label)', color: '#fff', 'font-size': '11px', 'font-weight': 'bold', 'text-wrap': 'wrap', 'text-max-width': '120px', 'text-overflow-wrap': 'anywhere', width: 'data(width)', height: 38, 'border-width': 0 }},
+        { selector: 'node[nodeType="fact"]', style: { ...common, shape: 'round-rectangle', 'background-color': '#6366f1', label: 'data(label)', color: '#fff', 'font-size': '10px', 'font-weight': 'bold', 'text-wrap': 'wrap', 'text-max-width': '150px', 'text-overflow-wrap': 'anywhere', width: 'data(width)', height: 'data(height)', 'border-width': 0 }},
+        { selector: 'node[nodeType="in_progress"]', style: { ...common, shape: 'ellipse', 'background-color': '#f59e0b', 'background-opacity': 0.85, label: 'data(label)', color: '#fff', 'font-size': '11px', 'font-weight': 'bold', width: 24, height: 24, 'border-width': 2, 'border-color': '#d97706' }},
+        { selector: 'node[nodeType="unclaimed"]', style: { ...common, shape: 'ellipse', 'background-color': '#cbd5e1', 'background-opacity': 0.5, label: 'data(label)', color: '#94a3b8', 'font-size': '11px', 'font-weight': 'bold', width: 22, height: 22, 'border-width': 1.5, 'border-color': '#94a3b8', 'border-style': 'dashed' }},
+        { selector: 'node[nodeType="bootstrap_pending"]', style: { ...common, shape: 'round-rectangle', 'background-color': '#fff7ed', label: 'data(label)', color: '#c2410c', 'font-size': '10px', 'font-weight': 'bold', width: 'data(width)', height: 'data(height)', 'border-width': 1.5, 'border-color': '#fdba74', 'border-style': 'dashed', 'text-wrap': 'wrap', 'text-max-width': '70px' }},
+        { selector: 'node[nodeType="bootstrap_running"]', style: { ...common, shape: 'round-rectangle', 'background-color': '#fb923c', label: 'data(label)', color: '#fff7ed', 'font-size': '10px', 'font-weight': 'bold', width: 'data(width)', height: 'data(height)', 'border-width': 2, 'border-color': '#ea580c', 'text-wrap': 'wrap', 'text-max-width': '70px' }},
+        { selector: 'edge[status="concluded"]', style: { width: 2, 'line-color': '#6ee7b7', 'target-arrow-color': '#6ee7b7', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', 'font-size': '7px', color: '#94a3b8', 'text-rotation': 'autorotate', 'text-margin-y': -9, 'text-max-width': '80px', 'text-wrap': 'ellipsis', 'text-background-color': '#f8fafc', 'text-background-opacity': 0.85, 'text-background-padding': '2px', 'arrow-scale': 0.9 }},
+        { selector: 'edge[status="in_progress"]', style: { width: 2, 'line-color': '#fbbf24', 'line-style': 'dashed', 'line-dash-pattern': [8, 4], 'target-arrow-color': '#fbbf24', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', 'font-size': '7px', color: '#b45309', 'text-rotation': 'autorotate', 'text-margin-y': -9, 'text-max-width': '80px', 'text-wrap': 'ellipsis', 'text-background-color': '#fffbeb', 'text-background-opacity': 0.85, 'text-background-padding': '2px', 'arrow-scale': 0.9 }},
+        { selector: 'edge[status="unclaimed"]', style: { width: 1.5, 'line-color': '#cbd5e1', 'line-style': 'dashed', 'line-dash-pattern': [5, 5], 'target-arrow-color': '#cbd5e1', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', 'font-size': '7px', color: '#94a3b8', 'text-rotation': 'autorotate', 'text-margin-y': -9, 'text-max-width': '80px', 'text-wrap': 'ellipsis', 'text-background-color': '#f8fafc', 'text-background-opacity': 0.85, 'text-background-padding': '2px', 'arrow-scale': 0.7 }},
+        { selector: 'edge[status="bootstrap_pending"]', style: { width: 2, 'line-color': '#fdba74', 'line-style': 'dashed', 'line-dash-pattern': [8, 4], 'target-arrow-color': '#fdba74', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', 'font-size': '7px', color: '#c2410c', 'text-rotation': 'autorotate', 'text-margin-y': -9, 'text-max-width': '88px', 'text-wrap': 'ellipsis', 'text-background-color': '#fff7ed', 'text-background-opacity': 0.92, 'text-background-padding': '2px', 'arrow-scale': 0.85 }},
+        { selector: 'edge[status="bootstrap_running"]', style: { width: 2.5, 'line-color': '#fb923c', 'line-style': 'dashed', 'line-dash-pattern': [10, 4], 'target-arrow-color': '#fb923c', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', 'font-size': '7px', color: '#c2410c', 'text-rotation': 'autorotate', 'text-margin-y': -9, 'text-max-width': '88px', 'text-wrap': 'ellipsis', 'text-background-color': '#fff7ed', 'text-background-opacity': 0.92, 'text-background-padding': '2px', 'arrow-scale': 0.85 }},
+        { selector: 'edge[status="completion"]', style: { width: 3, 'line-color': '#f472b6', 'line-style': 'dotted', 'line-dash-pattern': [2, 4], 'target-arrow-color': '#f472b6', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', 'font-size': '7px', color: '#db2777', 'text-rotation': 'autorotate', 'text-margin-y': -9, 'text-background-color': '#fdf2f8', 'text-background-opacity': 0.9, 'text-background-padding': '2px', 'arrow-scale': 1 }},
+        { selector: 'edge[edgeType="bootstrap_scope"]', style: { label: '', width: 1.8, 'curve-style': 'bezier', 'line-style': 'dotted', 'line-dash-pattern': [2, 5], 'target-arrow-shape': 'triangle-backcurve', 'arrow-scale': 0.75, 'target-distance-from-node': 2 }},
+        { selector: 'node.focus', style: { 'border-width': 3, 'border-color': '#312e81', 'border-opacity': 0.95, 'z-index': 1000 }},
+        { selector: 'edge.focus', style: { 'z-index': 1000, 'overlay-color': '#93c5fd', 'overlay-opacity': 0.22, 'overlay-padding': 5 }},
+        { selector: '.faded', style: { opacity: 0.5 }},
+      ];
+    },
+
+    layoutOpts(animate = true) {
+      const direction = this.layoutMode.endsWith('_lr') ? 'LR' : 'TB';
+      const engine = this.layoutMode.startsWith('elk') ? 'elk' : this.layoutMode.startsWith('klay') ? 'klay' : 'dagre';
+      if (engine === 'elk') {
+        return { name: 'elk', fit: true, padding: 50, animate, animationDuration: 350, animationEasing: 'ease-in-out-cubic',
+          elk: { algorithm: 'layered', 'elk.direction': direction === 'TB' ? 'DOWN' : 'RIGHT', 'elk.aspectRatio': '1.5',
+            'elk.spacing.nodeNode': '50', 'elk.layered.spacing.nodeNodeBetweenLayers': '80', 'elk.spacing.edgeNode': '25' } };
+      }
+      if (engine === 'klay') {
+        return { name: 'klay', fit: true, padding: 50, animate, animationDuration: 400, animationEasing: 'ease-in-out-cubic',
+          klay: { direction: direction === 'TB' ? 'DOWN' : 'RIGHT', edgeRouting: 'POLYLINE', crossingMinimization: 'LAYER_SWEEP',
+            nodeLayering: 'NETWORK_SIMPLEX', nodePlacement: 'BRANDES_KOEPF', separateConnectedComponents: true, spacing: 40, thoroughness: 8 } };
+      }
+      return { name: 'dagre', rankDir: direction, nodeSep: 60, rankSep: 80, padding: 50, fit: true, animate,
+        animationDuration: 400, animationEasing: 'ease-in-out-cubic' };
+    },
+
+    initGraph() {
+      const container = document.getElementById('cy');
+      if (!container || !this.run) return;
+      container.style.display = 'block';
+      const { nodes, edges } = this.buildElements();
+      const cy = cytoscape({
+        container,
+        elements: [...nodes, ...edges],
+        style: this.graphStyles(),
+        layout: this.layoutOpts(false),
+        minZoom: 0.12, maxZoom: 3.5,
+      });
+      this.cy = cy;
+      cy.on('tap', 'node', e => this.onNodeTap(e));
+      cy.on('tap', 'edge', e => this.onEdgeTap(e));
+      cy.on('tap', e => { if (e.target === cy) this.selectNode(null); });
+    },
+
+    onNodeTap(e) {
+      const d = e.target.data();
+      let node = { id: d.id, description: d.description || d.label, nodeType: d.nodeType,
+        source: d.source, created_at: d.created_at };
+      if (d.intentId) {
+        const intent = this.run.intents.find(i => i.id === d.intentId);
+        if (intent) node = { ...node, id: intent.id, description: intent.description,
+          worker: intent.worker, from: intent.from, creator: intent.creator,
+          concluded_at: intent.concluded_at };
+      }
+      this.cy.elements().removeClass('focus');
+      e.target.addClass('focus');
+      this.selectNode(node);
+    },
+
+    onEdgeTap(e) {
+      const d = e.target.data();
+      const intent = d.intentId ? this.run.intents.find(i => i.id === d.intentId) : null;
+      this.cy.elements().removeClass('focus');
+      e.target.addClass('focus');
+      this.selectNode(intent ? {
+        id: intent.id, description: intent.description, nodeType: 'intent_edge',
+        worker: intent.worker, creator: intent.creator, from: intent.from,
+        edgeFrom: d.source, created_at: intent.created_at, concluded_at: intent.concluded_at,
+        to: d.target, status: d.status,
+      } : {
+        id: `completion → ${d.target}`, description: '完成结论边', nodeType: 'completion_edge',
+        edgeFrom: d.source, to: 'goal',
+      });
+    },
+
+    selectNode(node) { this.selectedNode = node; if (this.sideTab !== 'detail') this.sideTab = 'detail'; },
+
+    updateGraph({ fit = false } = {}) {
+      if (!this.cy || !this.run) return;
+      const { nodes, edges } = this.buildElements();
+      const wantNodes = new Set(nodes.map(n => n.data.id));
+      const wantEdges = new Set(edges.map(e => e.data.id));
+      const prev = new Map();
+      this.cy.nodes().forEach(n => prev.set(n.id(), { x: n.position('x'), y: n.position('y') }));
+      let changed = false;
+
+      this.cy.nodes().forEach(n => { if (!wantNodes.has(n.id())) { n.remove(); changed = true; } });
+      this.cy.edges().forEach(e => { if (!wantEdges.has(e.id())) { e.remove(); changed = true; } });
+
+      for (const n of nodes) {
+        const ex = this.cy.getElementById(n.data.id);
+        if (ex.length === 0) {
+          n.position = this.initialPosition(n.data, prev);
+          this.cy.add(n);
+          changed = true;
+        } else {
+          if (JSON.stringify(ex.data()) !== JSON.stringify(n.data)) { ex.data(n.data); changed = true; }
+        }
+      }
+      for (const e of edges) {
+        const ex = this.cy.getElementById(e.data.id);
+        if (ex.length === 0) { this.cy.add(e); changed = true; }
+        else if (JSON.stringify(ex.data()) !== JSON.stringify(e.data)) { ex.data(e.data); changed = true; }
+      }
+      if (changed) {
+        const layout = this.layoutOpts(true);
+        if (!fit) { layout.fit = false; layout.animate = true; }
+        this.cy.layout(layout).run();
+      }
+    },
+
+    initialPosition(nodeData, prev) {
+      if (nodeData.intentId) {
+        const old = prev.get(nodeData.id);
+        if (old) return old;
+        const intent = this.run.intents.find(i => i.id === nodeData.intentId);
+        return this.anchor(intent ? intent.from : [], prev, 30);
+      }
+      const producer = this.run.intents.find(i => i.to === nodeData.id);
+      if (producer) {
+        const oldPh = prev.get(`_ph_${producer.id}`);
+        if (oldPh) return oldPh;
+        return this.anchor(producer.from, prev, 42);
+      }
+      const old = prev.get(nodeData.id);
+      return old || null;
+    },
+
+    anchor(fromIds, prev, offset) {
+      const pts = [];
+      for (const id of fromIds) {
+        const existing = this.cy.getElementById(id);
+        if (existing.length) pts.push({ x: existing.position('x'), y: existing.position('y') });
+        else if (prev.has(id)) pts.push(prev.get(id));
+      }
+      if (!pts.length) return null;
+      const avg = { x: pts.reduce((s, p) => s + p.x, 0) / pts.length, y: pts.reduce((s, p) => s + p.y, 0) / pts.length };
+      return this.layoutMode.endsWith('_lr') ? { x: avg.x + offset, y: avg.y } : { x: avg.x, y: avg.y + offset };
+    },
+
+    relayout() {
+      if (!this.cy) return;
+      this.cy.layout(this.layoutOpts()).run();
+    },
+
+    async selectRun(id) {
+      this.currentRunId = id;
+      this.pollError = '';
+      try {
+        if (this.mode === 'server') {
+          await this.loadRun(id);
+        } else {
+          // 静态模式: run 对象已在内存中
+          const r = this.runs.find(x => x.id === id);
+          if (r && r._board) this.applyRun(r._board, r._eventsText || '', false, id);
+        }
+      } catch (e) { this.pollError = e.message; this.toastMsg(`加载失败: ${e.message}`, 'error'); }
+    },
+
+    // ───────────────────────── 状态/样式辅助 ─────────────────────────
+    statusLabel(s) { return STATUS_LABELS[s] || s; },
+    statusBadgeClass(s) { return STATUS_BADGE[s] || 'bg-slate-100 text-slate-500 border border-slate-200'; },
+    statusDotClass(s) { return STATUS_DOT[s] || 'bg-slate-300'; },
+    statusTextClass(s) { return STATUS_TEXT[s] || 'text-slate-500'; },
+    get nodeCount() { return this.cy ? this.cy.nodes().length : 0; },
+    get edgeCount() { return this.cy ? this.cy.edges().length : 0; },
+
+    nodeBadgeClass(n) {
+      const map = { origin: 'bg-teal-50 text-teal-600', goal: 'bg-rose-50 text-rose-600',
+        fact: 'bg-indigo-50 text-indigo-600', intent_edge: 'bg-amber-50 text-amber-600',
+        completion_edge: 'bg-pink-50 text-pink-600' };
+      return map[n.nodeType] || 'bg-slate-100 text-slate-500';
+    },
+    nodeTypeLabel(n) {
+      const map = { origin: '起点', goal: '终点', fact: '事实', intent_edge: '意图边',
+        completion_edge: '完成边', bootstrap_pending: 'Bootstrap 待认领', bootstrap_running: 'Bootstrap 进行中',
+        in_progress: '探索中', unclaimed: '未认领' };
+      return map[n.nodeType] || n.nodeType;
+    },
+
+    // ───────────────────────── 时间线 ─────────────────────────
+    get timelineSourceLabel() {
+      return this.timelineSource === 'events' ? '数据源: events.jsonl' : '数据源: 由 board 推导';
+    },
+
+    timelineEvents() {
+      if (!this.run) return [];
+      if (this.timelineSource === 'events' && this._rawEventsText) {
+        return this.parseEventsFile(this._rawEventsText);
+      }
+      return this.deriveEvents(this.run);
+    },
+
+    deriveEvents(run) {
+      const out = [];
+      const t = (at, badge, text, extra = {}) => out.push({ id: `e${out.length + 1}`, time: at, badge, text, ...extra });
+      t(run.created_at, 'RUN', 'Run 创建');
+      for (const h of run.hints) t(h.created_at, 'HINT', h.content, { creator: h.creator, kind: 'hint' });
+      for (const i of run.intents) {
+        const label = this.isBootstrap(i) ? 'BOOTSTRAP' : 'INTENT';
+        t(i.created_at, label, i.description, { intentId: i.id, worker: i.creator, kind: 'declared' });
+        if (i.concluded_at) t(i.concluded_at, 'CONCLUDED', i.description, { intentId: i.id, worker: i.worker, kind: 'concluded' });
+      }
+      if (run.completed_at) {
+        t(run.completed_at, run.status === 'completed' ? 'COMPLETE' : 'FINALIZED',
+          run.completion ? run.completion.description : `run ${run.status}`, { kind: 'complete' });
+      }
+      return out.sort((a, b) => (a.time || '').localeCompare(b.time || '') || out.indexOf(a) - out.indexOf(b));
+    },
+
+    parseEventsFile(text) {
+      const out = [];
+      const BADGE = {
+        run_completed: 'COMPLETE', run_finalized: 'FINALIZED', hint_added: 'HINT',
+        intent_declared: 'INTENT', intent_claimed: 'CLAIMED', intent_released: 'RELEASED',
+        intent_concluded: 'CONCLUDED', reason_claimed: 'REASON', reason_done: 'REASON',
+        reason_failed: 'REASON', conclude_enter: 'CONCLUDE', dispatch: 'DISPATCH',
+      };
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+        const badge = BADGE[ev.event] || ev.event;
+        let text = '';
+        switch (ev.event) {
+          case 'run_completed': text = ev.description ? ev.description : `run 完成 (${(ev.from_ids || []).join(', ')})`; break;
+          case 'run_finalized': text = `run 收尾, 状态 ${ev.status}`; break;
+          case 'hint_added': text = `hint ${ev.hint}: ${ev.content || ''}`; break;
+          case 'intent_declared': text = `意图 ${ev.intent} 声明` + (ev.worker ? ` (by ${ev.worker})` : ''); break;
+          case 'intent_claimed': text = `意图 ${ev.intent} 被 ${ev.worker} 认领`; break;
+          case 'intent_released': text = `意图 ${ev.intent} 释放 (${ev.reason})`; break;
+          case 'intent_concluded': text = `意图 ${ev.intent} 结论 → ${ev.fact}`; break;
+          case 'reason_claimed': text = `reason 第 ${ev.round} 轮启动 (${ev.trigger})`; break;
+          case 'reason_done': text = `reason 输出: ${ev.outcome}`; break;
+          case 'reason_failed': text = `reason 作废${ev.timed_out ? ' (超时)' : ''}`; break;
+          case 'conclude_enter': text = `意图 ${ev.intent} 进入二阶段收尾 (${ev.reason})`; break;
+          case 'dispatch': text = `派发 ${ev.task}/${ev.phase} → ${ev.worker}` + (ev.intent ? ` (intent ${ev.intent})` : ''); break;
+          default: text = JSON.stringify(ev);
+        }
+        out.push({ id: `ev${out.length + 1}`, time: ev.ts, badge, text, worker: ev.worker, intentId: ev.intent, kind: ev.event, _raw: ev });
+      }
+      return out;
+    },
+
+    timelineDotClass(entry) {
+      const map = { RUN: 'bg-slate-300', COMPLETE: 'bg-pink-500', FINALIZED: 'bg-rose-400',
+        HINT: 'bg-amber-300', INTENT: 'bg-indigo-300', BOOTSTRAP: 'bg-orange-300',
+        CLAIMED: 'bg-amber-400', RELEASED: 'bg-slate-300', CONCLUDED: 'bg-emerald-400',
+        REASON: 'bg-sky-400', CONCLUDE: 'bg-violet-400', DISPATCH: 'bg-slate-200' };
+      return map[entry.badge] || 'bg-slate-300';
+    },
+    timelineBadgeClass(entry) {
+      const map = { RUN: 'bg-slate-100 text-slate-500', COMPLETE: 'bg-pink-50 text-pink-600',
+        FINALIZED: 'bg-rose-50 text-rose-500', HINT: 'bg-amber-50 text-amber-600',
+        INTENT: 'bg-indigo-50 text-indigo-500', BOOTSTRAP: 'bg-orange-50 text-orange-600',
+        CLAIMED: 'bg-amber-50 text-amber-600', RELEASED: 'bg-slate-100 text-slate-500',
+        CONCLUDED: 'bg-emerald-50 text-emerald-600', REASON: 'bg-sky-50 text-sky-600',
+        CONCLUDE: 'bg-violet-50 text-violet-600', DISPATCH: 'bg-slate-100 text-slate-400' };
+      return map[entry.badge] || 'bg-slate-100 text-slate-500';
+    },
+
+    // ───────────────────────── 回放 ─────────────────────────
+    buildReplayFrames() {
+      this.replay.frames = [];
+      this.replay.frameIndex = -1;
+      this.replay.playing = false;
+      if (this.replay.timer) { clearInterval(this.replay.timer); this.replay.timer = null; }
+      if (!this.run) return;
+      const events = this.timelineEvents();
+      const state = { nodes: [], edges: [] };
+      // 初始帧: origin/goal
+      for (const f of this.run.facts) {
+        if (f.id !== 'origin' && f.id !== 'goal') continue;
+        const nodeType = f.id === 'origin' ? 'origin' : 'goal';
+        state.nodes.push({ data: { id: f.id, label: this.factLabel(f), description: f.description,
+          nodeType, source: f.source, width: this.factWidth(f.description, nodeType) }});
+      }
+      this.replay.frames.push({ ...this.clone(state), events: [] });
+      for (const ev of events) {
+        this.applyReplayEvent(state, ev);
+        this.replay.frames.push({ ...this.clone(state), events: [ev.id] });
+      }
+    },
+
+    applyReplayEvent(state, ev) {
+      const r = this.run;
+      const addCompletionEdge = () => {
+        if (!r.completion) return;
+        for (const src of r.completion.from) {
+          if (!state.edges.some(e => e.data.id === `completion_${src}`)) {
+            state.edges.push({ data: { id: `completion_${src}`, source: src, target: 'goal',
+              intentId: null, label: '完成', status: 'completion' }});
+          }
+        }
+      };
+      if (ev.kind === 'hint' || ev.event === 'hint_added') return; // hint 不影响图
+      if (ev.kind === 'complete' || ev.event === 'run_completed') { addCompletionEdge(); return; }
+      const intentId = ev.intentId || (ev._raw && ev._raw.intent);
+      const intent = intentId ? r.intents.find(i => i.id === intentId) : null;
+      if (!intent) return;
+      switch (ev.kind) {
+        case 'declared': case 'intent_declared': {
+          if (!state.nodes.some(n => n.data.id === `_ph_${intent.id}`)) {
+            state.nodes.push({ data: {
+              id: `_ph_${intent.id}`, label: this.isBootstrap(intent) ? 'Bootstrap' : '?',
+              description: intent.description, nodeType: this.intentState(intent),
+              intentId: intent.id, worker: intent.worker,
+              width: this.isBootstrap(intent) ? 82 : 24, height: this.isBootstrap(intent) ? 30 : 24,
+            }});
+            for (const src of intent.from) {
+              if (!state.edges.some(e => e.data.id === `${intent.id}_${src}`)) {
+                state.edges.push({ data: { id: `${intent.id}_${src}`, source: src, target: `_ph_${intent.id}`,
+                  intentId: intent.id, label: intent.description, status: this.intentState(intent) }});
+              }
+            }
+          }
+          break;
+        }
+        case 'intent_claimed': case 'intent_released': {
+          const ph = state.nodes.find(n => n.data.intentId === intent.id);
+          if (ph) {
+            ph.data.worker = ev._raw.worker ?? null;
+            ph.data.nodeType = this.intentState(intent);
+            const edge = state.edges.find(e => e.data.intentId === intent.id && !e.data.edgeType);
+            if (edge) edge.data.status = this.intentState(intent);
+          }
+          break;
+        }
+        case 'concluded': case 'intent_concluded': {
+          const idx = state.nodes.findIndex(n => n.data.intentId === intent.id);
+          if (idx >= 0) state.nodes.splice(idx, 1);
+          state.edges = state.edges.filter(e => e.data.intentId !== intent.id);
+          for (const src of intent.from) {
+            state.edges.push({ data: { id: `${intent.id}_${src}`, source: src, target: intent.to,
+              intentId: intent.id, label: intent.description, status: 'concluded' }});
+          }
+          // 结论产出的事实节点入图
+          if (intent.to && !state.nodes.some(n => n.data.id === intent.to)) {
+            const fact = r.facts.find(x => x.id === intent.to);
+            if (fact) {
+              state.nodes.push({ data: { id: fact.id, label: this.factLabel(fact),
+                description: fact.description, nodeType: 'fact', source: fact.source,
+                width: this.factWidth(fact.description, 'fact'), height: 34 }});
+            }
+          }
+          break;
+        }
+      }
+    },
+
+    clone(o) { return JSON.parse(JSON.stringify(o)); },
+
+    replayToggle() {
+      if (!this.replay.frames.length) return;
+      if (this.replay.playing) {
+        this.replay.playing = false;
+        if (this.replay.timer) { clearInterval(this.replay.timer); this.replay.timer = null; }
+        return;
+      }
+      if (this.replay.frameIndex >= this.replay.frames.length - 1) this.replay.frameIndex = -1;
+      this.replay.playing = true;
+      const step = () => {
+        this.replay.frameIndex += 1;
+        if (this.replay.frameIndex >= this.replay.frames.length) {
+          this.replay.playing = false;
+          clearInterval(this.replay.timer);
+          this.replay.timer = null;
+          return;
+        }
+        this.applyReplayFrame(this.replay.frameIndex);
+      };
+      this.replay.timer = setInterval(step, Number(this.replay.stepMs));
+      step();
+    },
+
+    replayRestart() {
+      if (this.replay.timer) { clearInterval(this.replay.timer); this.replay.timer = null; }
+      this.replay.playing = false;
+      this.replay.frameIndex = 0;
+      this.applyReplayFrame(0);
+    },
+
+    applyReplayFrame(idx) {
+      if (!this.cy) return;
+      const frame = this.replay.frames[idx];
+      if (!frame) return;
+      const prev = new Map();
+      this.cy.nodes().forEach(n => prev.set(n.id(), { x: n.position('x'), y: n.position('y') }));
+      this.cy.elements().remove();
+      const elements = frame.nodes.map(n => {
+        const el = { data: n.data };
+        const pos = prev.get(n.data.id) || this.initialPosition(n.data, prev);
+        if (pos) el.position = pos;
+        return el;
+      }).concat(frame.edges);
+      this.cy.add(elements);
+      this.cy.layout(this.layoutOpts(true)).run();
+      const evIds = frame.events || [];
+      if (evIds.length) {
+        document.querySelectorAll('.timeline-flash').forEach(el => el.classList.remove('timeline-flash'));
+        const el = document.getElementById('tl-' + evIds[0]);
+        if (el) {
+          el.scrollIntoView({ block: 'nearest' });
+          el.classList.remove('timeline-flash');
+          void el.offsetWidth;
+          el.classList.add('timeline-flash');
+        }
+      }
+      const ev = this.timelineEvents()[Math.min(idx - 1, this.timelineEvents().length - 1)];
+      this.replay.currentEventText = ev ? `[${ev.badge}] ${ev.text}` : '';
+    },
+
+    get replayProgressLabel() { return `${Math.max(0, this.replay.frameIndex + 1)} / ${this.replay.frames.length}`; },
+  };
+}
+</script>
+</body>
+</html>

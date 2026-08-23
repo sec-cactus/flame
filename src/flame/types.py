@@ -41,6 +41,7 @@ class Brief:
     success_factors: list[str] = field(default_factory=list)
     failure_factors: list[str] = field(default_factory=list)
     decisive_move: str = ""
+    summary: str = ""
 
     def empty(self) -> bool:
         has_q = any(self.quadrants.get(k) for k in QUADRANT_KEYS)
@@ -60,6 +61,7 @@ class Brief:
             "success_factors": self.success_factors[:3],
             "failure_factors": self.failure_factors[:3],
             "decisive_move": self.decisive_move,
+            "summary": self.summary or self.decisive_move,
         }
 
     @classmethod
@@ -72,6 +74,7 @@ class Brief:
             success_factors=_brief_str_list(payload.get("success_factors"), 3),
             failure_factors=_brief_str_list(payload.get("failure_factors"), 3),
             decisive_move=str(payload.get("decisive_move") or "").strip(),
+            summary=str(payload.get("summary") or "").strip(),
         )
 
     def render_for_plan(self) -> str:
@@ -129,6 +132,7 @@ class Plan:
     verify_points: list[str]
     use_ledger: bool | None = None  # high only: mount j-space; default True when asked
     degraded: bool = False
+    summary: str = ""
 
 
 @dataclass
@@ -143,6 +147,7 @@ class VerifyResult:
     evidence_gaps: list[str] = field(default_factory=list)
     diagnosis: str = ""
     degraded: bool = False
+    summary: str = ""
 
 
 @dataclass

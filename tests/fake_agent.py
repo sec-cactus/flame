@@ -162,6 +162,7 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
                 "success_factors": ["done.txt exists"],
                 "failure_factors": ["act never writes"],
                 "decisive_move": "whether the workspace accepts writes",
+                "summary": "关键在 workspace 能否写入 done.txt",
             }
         )
     if phase == "meld":
@@ -186,6 +187,7 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
             {
                 "goal": "complete the flame task",
                 "approach": "write done.txt first to prove the workspace accepts writes",
+                "summary": "先写 done.txt 证明 workspace 可写",
                 "constraints": ["do not delete .flame"],
                 "verify_points": ["done.txt exists"],
                 **(
@@ -198,6 +200,17 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
     if phase == "act":
         if force:
             (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
+            (flame_dir / "act.json").write_text(
+                json.dumps(
+                    {
+                        "summary": "已创建 done.txt",
+                        "deliverables": ["done.txt"],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             emit(
                 {
                     "type": "tool_call",
@@ -223,7 +236,7 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
         diagnosis = ""
         retry = True
         drift_list: list[str] = []
-        checks = [f"done.txt exists={ (workspace / 'done.txt').is_file() }"]
+        checks = [f"path: done.txt exists={ (workspace / 'done.txt').is_file() }"]
         if abort:
             points_met = False
             retry = False
@@ -239,13 +252,15 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
             diagnosis = "first-pass fake failure"
         elif bad_evidence and not stamp.is_file():
             stamp.write_text("1\n", encoding="utf-8")
-            checks = ["no_such_evidence_file_12345.txt supports the claim"]
+            checks = ["path: no_such_evidence_file_12345.txt supports the claim"]
+            retry = False  # model thinks success; harness audit must still force retry
         passed = points_met and aligned and evidence_ok
         payload = {
             "points_met": points_met,
             "aligned": aligned,
             "evidence_ok": evidence_ok,
             "retry": retry,
+            "summary": "✓ 验收通过" if passed else diagnosis or "✗ 验收未通过",
             "checks": checks,
             "drift": drift_list,
             "evidence_gaps": [],
