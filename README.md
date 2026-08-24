@@ -1,11 +1,13 @@
 # Flame
 
-Minimal **plan → act → verify** harness over the local Cursor CLI (`agent`, default `--model auto`). Flame only orchestrates stages, writes `.flame/` handoffs, and enforces degrade rules. Verify is the only judge.
+Minimal **plan → act → verify** harness over a local coding agent CLI. Supports **Cursor** (`agent`) and **OpenCode** (`opencode`). Flame only orchestrates stages, writes `.flame/` handoffs, and enforces degrade rules. Verify is the only judge.
 
 ## Requirements
 
 - Python 3.11+ (stdlib only)
-- Cursor CLI (`agent`) on `PATH`, logged in
+- One of:
+  - Cursor CLI (`agent`) on `PATH`, logged in (`agent login`)
+  - OpenCode CLI (`opencode`) on `PATH`, logged in (`opencode auth login`)
 
 ## Install
 
@@ -32,6 +34,8 @@ flame skills
 flame run "fix the failing tests"
 flame run "summarize this repo" --effort fast --workspace .
 flame run "…" --effort max --model auto
+# OpenCode backend (model is provider/model):
+flame run "…" --agent-backend opencode --model opencode-go/deepseek-v4-flash
 ```
 
 **Progress → stderr** (`▶ plan` / tools / `✓ passed`). **Final answer → stdout** (usually last act text; `retry=false` → diagnosis).
@@ -71,8 +75,10 @@ Preprocess / plan / verify can fail open. **Act timeout** (`FLAME_TIMEOUT_SEC`, 
 
 | env / flag | default |
 |---|---|
-| `FLAME_AGENT_BIN` / `--agent-bin` | `agent` |
-| `FLAME_MODEL` / `--model` | `auto` |
+| `FLAME_AGENT_BACKEND` / `--agent-backend` | `cursor` (`cursor` \| `opencode`) |
+| `FLAME_AGENT_BIN` / `--agent-bin` | `agent` or `opencode` by backend |
+| `FLAME_MODEL` / `--model` | `auto` (OpenCode: use `provider/model`) |
+| `FLAME_OPENCODE_MODEL` | `opencode-go/deepseek-v4-flash` (when OpenCode + model=`auto`) |
 | `FLAME_WORKSPACE` / `--workspace` | cwd |
 | `FLAME_EFFORT` / `--effort` | `standard` |
 | `FLAME_TIMEOUT_SEC` | `1800` |

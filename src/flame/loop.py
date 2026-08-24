@@ -5,11 +5,13 @@ import shutil
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from flame import budget, evidence, preprocess, prompts, skills, stage_summary
-from flame.backend import AgentBackend, extract_json
+from flame.agent_backends import AgentBackend
+from flame.backend import create_agent_backend, extract_json
 from flame.config import Config
 from flame.log import SessionLog
 from flame.progress import Progress
@@ -21,6 +23,39 @@ class FlameError(RuntimeError):
     pass
 
 
+_STAGE_MARKERS = (
+    "brief.json",
+    "meld-judge.json",
+    "plan.json",
+    "plan.raw.txt",
+    "act.json",
+    "act_status.json",
+    "act_skill.json",
+    "verify.json",
+    "verify_debug.txt",
+    "tool_trace.json",
+    "graph_seed.json",
+    "graph_run.json",
+    "graph-result.md",
+)
+
+
+def _archive_stage_markers(flame_dir: Path, *, keep: tuple[str, ...] = ()) -> None:
+    """Move leftover stage JSON so a new run doesn't inherit the previous pipeline."""
+    dest: Path | None = None
+    for name in _STAGE_MARKERS:
+        if name in keep:
+            continue
+        src = flame_dir / name
+        if not src.is_file():
+            continue
+        if dest is None:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            dest = flame_dir / "prior" / stamp
+            dest.mkdir(parents=True, exist_ok=True)
+        src.rename(dest / name)
+
+
 DEFAULT_GRAPH_EXTRA_BUDGET_SEC = 900.0
 
 
@@ -29,6 +64,7 @@ def continue_run(
     *,
     workspace: str | Path | None = None,
     model: str | None = None,
+    agent_backend: str | None = None,
     agent_bin: str | None = None,
     force: bool | None = None,
     extra_budget: float | None = None,
@@ -40,6 +76,7 @@ def continue_run(
         workspace=workspace,
         effort="max",
         model=model,
+        agent_backend=agent_backend,
         agent_bin=agent_bin,
         force=force,
     )
@@ -48,10 +85,11 @@ def continue_run(
     progress = progress or Progress()
     flame_dir = cfg.workspace / ".flame"
     flame_dir.mkdir(parents=True, exist_ok=True)
+    _archive_stage_markers(flame_dir, keep=("brief.json", "plan.json", "graph_run.json"))
     session_id = uuid.uuid4().hex[:12]
     log = SessionLog(cfg.log_dir / f"{session_id}.jsonl")
     log.emit("start", task=task, effort="max", model=cfg.model, mode="continue")
-    backend = AgentBackend(cfg, progress)
+    backend = create_agent_backend(cfg, progress)
 
     original_task = task.strip()
     if not original_task:
@@ -170,6 +208,7 @@ def run(
     workspace: str | Path | None = None,
     effort: str | None = None,
     model: str | None = None,
+    agent_backend: str | None = None,
     agent_bin: str | None = None,
     force: bool | None = None,
     safety_gate: bool | None = None,
@@ -180,6 +219,7 @@ def run(
         workspace=workspace,
         effort=effort,
         model=model,
+        agent_backend=agent_backend,
         agent_bin=agent_bin,
         force=force,
         safety_gate=safety_gate,
@@ -193,10 +233,11 @@ def run(
 
     flame_dir = cfg.workspace / ".flame"
     flame_dir.mkdir(parents=True, exist_ok=True)
+    _archive_stage_markers(flame_dir)
     session_id = uuid.uuid4().hex[:12]
     log = SessionLog(cfg.log_dir / f"{session_id}.jsonl")
     log.emit("start", task=task, effort=cfg.effort.value, model=cfg.model)
-    backend = AgentBackend(cfg, progress)
+    backend = create_agent_backend(cfg, progress)
 
     original_task = task
     (flame_dir / "original.md").write_text(original_task + "\n", encoding="utf-8")
@@ -275,6 +316,8 @@ def run(
                 encoding="utf-8",
             )
             progress.note(f"fact-graph inited: {graph_run_rel}")
+            # Fresh board → old graph-result.md must not shadow this cycle's RESULT.md.
+            (flame_dir / "graph-result.md").unlink(missing_ok=True)
         else:
             graph_seed_path.unlink(missing_ok=True)
             (flame_dir / "graph_run.json").unlink(missing_ok=True)
@@ -674,6 +717,7 @@ def _run_verify(
     if payload is None:
         payload = extract_json(result.text)
     if payload is None:
+        _dump_verify_debug(flame_dir, result)
         return VerifyResult(
             passed=False,
             points_met=False,
@@ -692,6 +736,26 @@ def _run_verify(
     )
     _write_verify(path, verify)
     return verify
+
+
+def _dump_verify_debug(flame_dir: Path, result: Any) -> None:
+    """Persist raw verify output on degraded for post-mortem diagnosis."""
+    try:
+        lines = [
+            f"returncode: {result.returncode}",
+            f"is_error: {result.is_error}",
+            f"text_len: {len(result.text or '')}",
+            "",
+            "--- stdout/text ---",
+            (result.text or "(empty)").strip(),
+        ]
+        if hasattr(result, "stderr") and result.stderr:
+            lines += ["", "--- stderr ---", result.stderr.strip()]
+        (flame_dir / "verify_debug.txt").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _verify_from_payload(

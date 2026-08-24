@@ -37,6 +37,27 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertIn("done.txt", trace.paths)
 
+    def test_collect_opencode_file_path(self) -> None:
+        """OpenCode read/write/edit use filePath; trace must record it (normalized event)."""
+        raw = {
+            "type": "tool_use",
+            "part": {
+                "tool": "write",
+                "state": {
+                    "status": "completed",
+                    "input": {"filePath": "/tmp/ws/done.txt", "content": "hello\n"},
+                },
+            },
+        }
+        from flame.agent_backends import normalize_opencode_event
+
+        trace = ToolTrace()
+        collect_tool_event(normalize_opencode_event(raw), trace)
+        self.assertTrue(
+            any(p.endswith("done.txt") for p in trace.paths),
+            trace.paths,
+        )
+
     def test_audit_missing_path(self) -> None:
         workspace = Path(__file__).resolve().parent / ".tmp_evidence"
         workspace.mkdir(exist_ok=True)

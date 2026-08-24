@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from flame import budget, prompts
-from flame.backend import AgentBackend, extract_json
+from flame.agent_backends import AgentBackend
+from flame.backend import create_agent_backend, extract_json
 from flame.log import SessionLog
 from flame.progress import Progress
 from flame.types import Brief, Effort, Phase, QUADRANT_KEYS
@@ -162,11 +163,11 @@ def _factors(
     log.emit("agent_done", phase="factors", error=result.is_error, code=result.returncode)
     if result.is_error or not result.text.strip():
         progress.fail("factors failed; brief keeps quadrants only")
-        return [], [], ""
+        return [], [], "", ""
     payload = extract_json(result.text)
     if not isinstance(payload, dict):
         progress.fail("factors JSON missing; brief keeps quadrants only")
-        return [], [], ""
+        return [], [], "", ""
     move = str(payload.get("decisive_move") or "").strip()
     summary = str(payload.get("summary") or move).strip()
     return (

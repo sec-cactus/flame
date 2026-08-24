@@ -47,6 +47,7 @@ class LoopTests(unittest.TestCase):
 
     def _cfg(self, workspace: Path, effort: Effort = Effort.fast) -> Config:
         return Config(
+            agent_backend="cursor",
             agent_bin=str(_fake_agent()),
             model="auto",
             workspace=workspace,
@@ -121,6 +122,33 @@ class LoopTests(unittest.TestCase):
         self.assertIn("wrote done.txt", result.output)
         self.assertIn("fast: one verify round", buf.getvalue())
         self.assertNotIn("▶ preprocess", buf.getvalue())
+
+    def test_stale_stage_files_are_archived(self) -> None:
+        """A new run must not inherit the previous task's pipeline state."""
+        workspace = self._workspace("stale_markers")
+        flame = workspace / ".flame"
+        flame.mkdir(parents=True)
+        stale_verify = {"passed": True, "points_met": True, "summary": "old task passed"}
+        (flame / "verify.json").write_text(json.dumps(stale_verify), encoding="utf-8")
+        (flame / "meld-judge.json").write_text('{"consensus": []}', encoding="utf-8")
+        (flame / "graph-result.md").write_text("previous task text", encoding="utf-8")
+        result = run(
+            "create done.txt",
+            config=self._cfg(workspace),
+            progress=Progress(stream=io.StringIO()),
+        )
+        self.assertTrue(result.passed, result.output)
+        flame = workspace / ".flame"
+        self.assertFalse((flame / "meld-judge.json").is_file())
+        self.assertFalse((flame / "graph-result.md").is_file())
+        new_verify = json.loads((flame / "verify.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(new_verify.get("summary"), "old task passed")
+        priors = sorted((flame / "prior").glob("*"))
+        self.assertTrue(priors)
+        archived = {p.name for p in priors[0].iterdir()}
+        self.assertIn("verify.json", archived)
+        self.assertIn("meld-judge.json", archived)
+        self.assertIn("graph-result.md", archived)
 
     def test_safety_cap_stops_retry(self) -> None:
         os.environ["FLAME_FAKE_FAIL_ONCE"] = "1"

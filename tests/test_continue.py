@@ -61,11 +61,16 @@ class ContinueRunTests(LoopTests):
             "max_facts = 5\nwallclock_budget = 60\nprompt_group = 'mock'\n",
             encoding="utf-8",
         )
+        # Stale handoff from the previous task must not shadow this run's RESULT.md.
+        (flame / "graph-result.md").write_text(
+            "STALE previous task text\n", encoding="utf-8"
+        )
         return workspace
 
     def test_continue_run_hint_and_verify(self) -> None:
         workspace = self._seed_graph_workspace("continue_ok")
         cfg = self._cfg(workspace, Effort.max)
+        run_dir = workspace / ".fact-graph" / "runs" / "flame-act-c1"
 
         def fake_subprocess(cmd, **kwargs):
             proc = mock.Mock()
@@ -77,6 +82,9 @@ class ContinueRunTests(LoopTests):
             elif "run" in cmd:
                 proc.stdout = "run 结束: status=stopped\n"
                 (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
+                (run_dir / "RESULT.md").write_text(
+                    "FRESH continue result\n", encoding="utf-8"
+                )
             else:
                 proc.stdout = ""
             proc.stderr = ""
@@ -90,6 +98,8 @@ class ContinueRunTests(LoopTests):
             )
         self.assertTrue(result.passed, result.output)
         self.assertTrue((workspace / "done.txt").is_file())
+        self.assertIn("FRESH continue result", result.output)
+        self.assertNotIn("STALE previous task text", result.output)
         inbox = workspace / ".fact-graph" / "runs" / "flame-act-c1" / "inbox.jsonl"
         self.assertFalse(inbox.is_file())  # hint via subprocess mock, not real file
 

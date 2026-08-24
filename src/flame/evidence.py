@@ -62,7 +62,17 @@ def collect_tool_event(event: dict[str, Any], into: ToolTrace) -> None:
             _ingest_blob(blob, into)
             continue
         args = body.get("args") if isinstance(body.get("args"), dict) else {}
-        for field_name in ("path", "file", "filename", "target", "uri", "url"):
+        for field_name in (
+            "path",
+            "file",
+            "filename",
+            "filePath",
+            "file_path",
+            "notebook_path",
+            "target",
+            "uri",
+            "url",
+        ):
             value = args.get(field_name)
             if value:
                 _ingest_blob(str(value), into)

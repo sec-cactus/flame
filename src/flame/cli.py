@@ -17,7 +17,14 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("task", nargs="+", help="task prompt")
     run_p.add_argument("--effort", choices=["fast", "standard", "high", "max"], default=None)
     run_p.add_argument("--workspace", default=None)
-    run_p.add_argument("--model", default=None, help="passed to agent --model (default: auto)")
+    run_p.add_argument("--model", default=None, help="agent model (cursor: auto; opencode: provider/model)")
+    run_p.add_argument(
+        "--agent-backend",
+        choices=["cursor", "opencode"],
+        default=None,
+        dest="agent_backend",
+        help="agent CLI backend (default: cursor, or FLAME_AGENT_BACKEND)",
+    )
     run_p.add_argument("--agent-bin", default=None, dest="agent_bin")
     run_p.add_argument("--no-force", action="store_true", help="do not pass --force to agent")
     run_p.add_argument(
@@ -33,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
     cont_p.add_argument("task", nargs="+", help="follow-up instruction (written as graph hint)")
     cont_p.add_argument("--workspace", default=None)
     cont_p.add_argument("--model", default=None)
+    cont_p.add_argument(
+        "--agent-backend",
+        choices=["cursor", "opencode"],
+        default=None,
+        dest="agent_backend",
+    )
     cont_p.add_argument("--agent-bin", default=None, dest="agent_bin")
     cont_p.add_argument("--no-force", action="store_true")
     cont_p.add_argument(
@@ -60,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         "task": task,
         "workspace": args.workspace,
         "model": args.model,
+        "agent_backend": args.agent_backend,
         "agent_bin": args.agent_bin,
         "force": False if args.no_force else None,
     }
