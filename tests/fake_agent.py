@@ -200,6 +200,7 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
     if phase == "act":
         if force:
             (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
+            (workspace / "answer.md").write_text("ok\n", encoding="utf-8")
             (flame_dir / "act.json").write_text(
                 json.dumps(
                     {

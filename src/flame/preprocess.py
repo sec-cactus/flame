@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flame import budget, prompts
+from flame import budget, prompts, schema
 from flame.agent_backends import AgentBackend
 from flame.backend import create_agent_backend, extract_json
 from flame.log import SessionLog
@@ -113,6 +113,10 @@ def _meld(
     if payload is None:
         progress.fail("meld judge JSON missing; quadrants continue without it")
         return "", None
+    if not isinstance(payload, dict):
+        progress.fail("meld judge JSON missing; quadrants continue without it")
+        return "", None
+    payload = schema.strip_to_allowed(payload, schema.MELD_JUDGE_KEYS)
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     (flame_dir / "meld-judge.json").write_text(text + "\n", encoding="utf-8")
     return text, payload

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import time
 import unittest
 from pathlib import Path
 
@@ -70,6 +71,7 @@ class LoopTests(unittest.TestCase):
         )
         self.assertTrue(result.passed, result.output)
         self.assertTrue((workspace / "done.txt").is_file())
+        self.assertTrue((workspace / "answer.md").is_file())
         self.assertTrue((workspace / ".flame" / "plan.json").is_file())
         log = buf.getvalue()
         self.assertIn("▶ plan", log)
@@ -381,6 +383,62 @@ class LoopTests(unittest.TestCase):
         self.assertFalse(verify.evidence_ok)
         self.assertTrue(verify.retry)
         self.assertNotIn("cancel/await", " ".join(verify.evidence_gaps))
+
+    def test_stale_answer_md_fails_verify(self) -> None:
+        workspace = self._workspace("stale_answer")
+        answer = workspace / "answer.md"
+        answer.write_text("round-1 leftover\n", encoding="utf-8")
+        old = time.time() - 120
+        os.utime(answer, (old, old))
+        flame = workspace / ".flame"
+        flame.mkdir()
+        (flame / "plan.json").write_text("{}\n", encoding="utf-8")
+        plan_mtime = time.time()
+        os.utime(flame / "plan.json", (plan_mtime, plan_mtime))
+        os.utime(answer, (old, old))
+        (workspace / "run.py").write_text("ok\n", encoding="utf-8")
+        verify = _verify_from_payload(
+            {
+                "points_met": True,
+                "aligned": True,
+                "evidence_ok": True,
+                "retry": False,
+                "checks": ["path: run.py exists"],
+                "drift": [],
+                "evidence_gaps": [],
+                "diagnosis": "",
+            },
+            workspace=workspace,
+            trace=ToolTrace(paths={"run.py", "answer.md"}),
+            plan_mtime=plan_mtime,
+        )
+        self.assertFalse(verify.passed)
+        self.assertFalse(verify.evidence_ok)
+        self.assertTrue(verify.retry)
+        self.assertTrue(any("answer.md" in g for g in verify.evidence_gaps))
+
+    def test_plan_extra_keys_fail_when_points_met(self) -> None:
+        workspace = self._workspace("plan_extra")
+        (workspace / "answer.md").write_text("fresh\n", encoding="utf-8")
+        verify = _verify_from_payload(
+            {
+                "points_met": True,
+                "aligned": True,
+                "evidence_ok": True,
+                "retry": False,
+                "checks": ["path: answer.md exists"],
+                "drift": [],
+                "evidence_gaps": [],
+                "diagnosis": "",
+            },
+            workspace=workspace,
+            trace=ToolTrace(paths={"answer.md"}),
+            plan_mtime=time.time() - 5,
+            schema_gaps=["plan.json extra keys after act: answer"],
+        )
+        self.assertFalse(verify.passed)
+        self.assertFalse(verify.evidence_ok)
+        self.assertTrue(verify.retry)
 
     def test_content_failure_keeps_model_retry_false(self) -> None:
         verify = _verify_from_payload(

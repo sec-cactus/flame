@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flame import budget, evidence, preprocess, prompts, skills, stage_summary
+from flame import budget, evidence, preprocess, prompts, schema, skills, stage_summary
 from flame.agent_backends import AgentBackend
 from flame.backend import create_agent_backend, extract_json
 from flame.config import Config
@@ -107,6 +107,8 @@ def continue_run(
     else:
         plan = _stub_plan(original_task, ask_use_ledger=False)
     plan.goal = original_task
+    _write_plan(flame_dir / "plan.json", plan)
+    plan_mtime = (flame_dir / "plan.json").stat().st_mtime
 
     factgraph = skills.factgraph_dir()
     if factgraph is None:
@@ -143,6 +145,7 @@ def continue_run(
     )
     progress.note(f"fact-graph continue ended: {graph_status}")
     act_output = _read_graph_act_output(cfg.workspace, run_dir)
+    _write_answer_md(cfg.workspace, act_output)
     _finalize_act_json(
         flame_dir,
         cfg.workspace,
@@ -167,6 +170,8 @@ def continue_run(
         cycle_trace=cycle_trace,
         act_note=act_note,
         require_evidence_touch=False,
+        plan_mtime=plan_mtime,
+        schema_gaps=list(plan.schema_gaps),
     )
     if verify.degraded:
         progress.fail("verify degraded; delivering act output")
@@ -277,6 +282,7 @@ def run(
         elif not budget.ask_use_ledger(cfg.effort):
             plan.use_ledger = None
         _write_plan(flame_dir / "plan.json", plan)
+        plan_mtime = (flame_dir / "plan.json").stat().st_mtime
         skill = _act_skill(cfg.effort, plan)
         progress.note("goal: original (harness-forced)")
         if plan.degraded:
@@ -388,12 +394,15 @@ def run(
             (flame_dir / "act_status.json").unlink(missing_ok=True)
             act_output = act.text.strip() or plan.goal
 
+        schema_gaps = list(plan.schema_gaps)
+        schema_gaps.extend(_restore_plan_if_mutated(flame_dir, plan))
         _finalize_act_json(
             flame_dir,
             cfg.workspace,
             act_text=act.text,
             timed_out=act.timed_out,
         )
+        schema_gaps.extend(_canonical_act_json(flame_dir))
 
         log.emit("phase", phase="verify", cycle=cycle)
         progress.phase("verify", cap)
@@ -406,6 +415,8 @@ def run(
             workspace=cfg.workspace,
             cycle_trace=cycle_trace,
             act_note=act_note,
+            plan_mtime=plan_mtime,
+            schema_gaps=schema_gaps,
         )
         last_text = act_output
         if verify.degraded:
@@ -662,6 +673,9 @@ def _run_plan(
         log.emit("plan_degraded", reason="no_json")
         return _stub_plan(original_task, ask_use_ledger=ask_use_ledger)
     plan = _plan_from(payload, ask_use_ledger=ask_use_ledger)
+    plan.schema_gaps = schema.validate_plan_payload(
+        payload, ask_use_ledger=ask_use_ledger
+    )
     if not plan.summary.strip():
         plan.summary = stage_summary.plan_summary(payload if isinstance(payload, dict) else None)
     _write_plan(flame_dir / "plan.json", plan)
@@ -695,6 +709,8 @@ def _run_verify(
     cycle_trace: evidence.ToolTrace,
     act_note: str = "",
     require_evidence_touch: bool = True,
+    plan_mtime: float | None = None,
+    schema_gaps: list[str] | None = None,
 ) -> VerifyResult:
     verify_trace = evidence.ToolTrace()
     result = backend.run(
@@ -733,6 +749,8 @@ def _run_verify(
         trace=cycle_trace,
         fail_open_if_no_trace=bool(act_note),
         require_evidence_touch=require_evidence_touch,
+        plan_mtime=plan_mtime,
+        schema_gaps=schema_gaps,
     )
     _write_verify(path, verify)
     return verify
@@ -765,10 +783,16 @@ def _verify_from_payload(
     trace: evidence.ToolTrace | None = None,
     fail_open_if_no_trace: bool = False,
     require_evidence_touch: bool = True,
+    plan_mtime: float | None = None,
+    schema_gaps: list[str] | None = None,
 ) -> VerifyResult:
     checks = _str_list(payload.get("checks"))
     drift = _str_list(payload.get("drift"))
     gaps = _str_list(payload.get("evidence_gaps"))
+    format_gaps = schema.validate_verify_payload(payload) + list(schema_gaps or [])
+    for gap in format_gaps:
+        if gap not in gaps:
+            gaps.append(gap)
     if "points_met" in payload:
         points_met = bool(payload.get("points_met"))
     else:
@@ -792,6 +816,14 @@ def _verify_from_payload(
                 gaps.append(gap)
         if not audit.ok:
             evidence_ok = False
+    if workspace is not None and plan_mtime is not None:
+        for gap in schema.audit_answer_vs_plan(workspace, plan_mtime=plan_mtime):
+            if gap not in gaps:
+                gaps.append(gap)
+            if points_met:
+                evidence_ok = False
+    if format_gaps and points_met:
+        evidence_ok = False
     passed = points_met and aligned and evidence_ok
     diagnosis = str(payload.get("diagnosis") or "")
     if not passed and not diagnosis:
@@ -884,6 +916,38 @@ def _finalize_act_json(
             graph_note=graph_note,
         )
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _canonical_act_json(flame_dir: Path) -> list[str]:
+    path = flame_dir / "act.json"
+    payload = _read_json_file(path)
+    if payload is None:
+        return ["act.json missing"]
+    gaps = schema.validate_act_payload(payload)
+    cleaned = schema.strip_to_allowed(payload, schema.ACT_KEYS)
+    path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return gaps
+
+
+def _restore_plan_if_mutated(flame_dir: Path, plan: Plan) -> list[str]:
+    path = flame_dir / "plan.json"
+    payload = _read_json_file(path)
+    gaps: list[str] = []
+    if payload is None:
+        gaps.append("plan.json missing after act")
+    else:
+        extra = schema.extra_keys(payload, schema.PLAN_KEYS)
+        if extra:
+            gaps.append("plan.json extra keys after act: " + ", ".join(extra))
+    _write_plan(path, plan)
+    return gaps
+
+
+def _write_answer_md(workspace: Path, text: str) -> None:
+    body = str(text or "").strip()
+    if not body:
+        return
+    (workspace / "answer.md").write_text(body + "\n", encoding="utf-8")
 
 
 def _read_json_file(path: Path) -> dict[str, Any] | None:

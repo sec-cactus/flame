@@ -182,7 +182,7 @@ Verify contract: verify_points (min-fail checks). Verify also receives the origi
 {ledger_rules}
 {extra}
 Write ONLY `.flame/plan.json` (create `.flame/` if needed). Do not change any other files.
-JSON schema:
+JSON schema (no extra keys):
 {{
   "goal": "verbatim copy of the original user request",
   "approach": "how to get there this cycle; first sentence is the load that if wrong fails the task",
@@ -227,6 +227,9 @@ Approach:
 {plan.approach or "(none — do the original request)"}
 Constraints:
 {constraints}
+Do not add keys to `.flame/plan.json`. The user's reply belongs in `answer.md`.
+Write or replace `answer.md` (workspace root or `.flame/answer.md`) this cycle.
+The UI displays that file and nothing else as the answer.
 """
     if skill == "j-space":
         body += _jspace_act_addendum(jspace_dir)
@@ -368,6 +371,10 @@ Do not implement new features. You may run commands to check.
 Two contracts only:
 1. Original user request — did the work satisfy this, or only a proxy?
 2. verify_points — actually run min-fail checks. A check that must fail if the work is wrong.
+
+This cycle must have written or replaced answer.md (workspace root or `.flame/answer.md`).
+A leftover answer.md older than this cycle's `.flame/plan.json` is not this cycle's answer.
+The harness checks that file's modification time against plan.json.
 
 Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
 In each checks[] line, cite handles explicitly: `path: re.json …`, `url: …`, or a backtick command. Use workspace-relative paths only (not host absolute paths or container-only prefixes like app/ unless that directory exists).

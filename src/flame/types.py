@@ -133,6 +133,7 @@ class Plan:
     use_ledger: bool | None = None  # high only: mount j-space; default True when asked
     degraded: bool = False
     summary: str = ""
+    schema_gaps: list[str] = field(default_factory=list)
 
 
 @dataclass
