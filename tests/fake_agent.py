@@ -199,6 +199,20 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
         )
     if phase == "act":
         if force:
+            if os.environ.get("FLAME_FAKE_MUTATE_PLAN") == "1":
+                plan_path = flame_dir / "plan.json"
+                if plan_path.is_file():
+                    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+                    payload["answer"] = "stashed in plan"
+                    plan_path.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+            if os.environ.get("FLAME_FAKE_MUTATE_VERIFY") == "1":
+                (flame_dir / "verify.json").write_text(
+                    json.dumps({"hacked": True}, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
             (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
             (workspace / "answer.md").write_text("ok\n", encoding="utf-8")
             (flame_dir / "act.json").write_text(

@@ -344,6 +344,7 @@ def run(
             + "\n",
             encoding="utf-8",
         )
+        verify_before = _read_bytes(flame_dir / "verify.json")
         cycle_trace = evidence.ToolTrace()
         act_trace = evidence.ToolTrace()
         act = backend.run(
@@ -396,6 +397,7 @@ def run(
 
         schema_gaps = list(plan.schema_gaps)
         schema_gaps.extend(_restore_plan_if_mutated(flame_dir, plan))
+        schema_gaps.extend(_restore_verify_if_mutated(flame_dir, verify_before))
         _finalize_act_json(
             flame_dir,
             cfg.workspace,
@@ -682,7 +684,7 @@ def _run_plan(
     return plan
 
 
-def _write_plan(path: Path, plan: Plan) -> None:
+def _plan_payload(plan: Plan) -> dict[str, Any]:
     dumped: dict[str, Any] = {
         "goal": plan.goal,
         "approach": plan.approach,
@@ -695,7 +697,14 @@ def _write_plan(path: Path, plan: Plan) -> None:
         dumped["use_ledger"] = plan.use_ledger
     if plan.degraded:
         dumped["degraded"] = True
-    path.write_text(json.dumps(dumped, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return dumped
+
+
+def _write_plan(path: Path, plan: Plan) -> None:
+    path.write_text(
+        json.dumps(_plan_payload(plan), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _run_verify(
@@ -929,18 +938,50 @@ def _canonical_act_json(flame_dir: Path) -> list[str]:
     return gaps
 
 
+def _read_bytes(path: Path) -> bytes | None:
+    if not path.is_file():
+        return None
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
 def _restore_plan_if_mutated(flame_dir: Path, plan: Plan) -> list[str]:
+    """Rewrite plan.json only if act changed it. A no-op write would bump mtime."""
     path = flame_dir / "plan.json"
     payload = _read_json_file(path)
+    expected = _plan_payload(plan)
     gaps: list[str] = []
     if payload is None:
         gaps.append("plan.json missing after act")
-    else:
-        extra = schema.extra_keys(payload, schema.PLAN_KEYS)
-        if extra:
-            gaps.append("plan.json extra keys after act: " + ", ".join(extra))
-    _write_plan(path, plan)
+        _write_plan(path, plan)
+        return gaps
+    extra = schema.extra_keys(payload, schema.PLAN_KEYS)
+    if extra:
+        gaps.append("plan.json extra keys after act: " + ", ".join(extra))
+    elif payload != expected:
+        gaps.append("plan.json was rewritten during act")
+    if gaps:
+        _write_plan(path, plan)
     return gaps
+
+
+def _restore_verify_if_mutated(flame_dir: Path, before: bytes | None) -> list[str]:
+    """Act must not create, delete, or rewrite verify.json."""
+    path = flame_dir / "verify.json"
+    after = _read_bytes(path)
+    if before is None:
+        if after is None:
+            return []
+        path.unlink(missing_ok=True)
+        return ["verify.json was written during act"]
+    if after == before:
+        return []
+    path.write_bytes(before)
+    if after is None:
+        return ["verify.json missing after act"]
+    return ["verify.json was rewritten during act"]
 
 
 def _write_answer_md(workspace: Path, text: str) -> None:

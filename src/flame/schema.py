@@ -199,7 +199,7 @@ def answer_md_path(workspace: Path) -> Path | None:
 
 
 def audit_answer_vs_plan(workspace: Path, *, plan_mtime: float) -> list[str]:
-    """answer.md must exist and not be older than this cycle's plan.json."""
+    """answer.md must exist and not be older than this cycle's plan-phase snapshot."""
     path = answer_md_path(workspace)
     if path is None:
         return [

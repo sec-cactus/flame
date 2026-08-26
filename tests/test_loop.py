@@ -10,11 +10,19 @@ import unittest
 from pathlib import Path
 
 from flame.config import Config
-from flame.loop import FlameError, _plan_from, _verify_from_payload, run
+from flame.loop import (
+    FlameError,
+    _plan_from,
+    _restore_plan_if_mutated,
+    _restore_verify_if_mutated,
+    _verify_from_payload,
+    _write_plan,
+    run,
+)
 from flame.evidence import ToolTrace
 from flame.progress import Progress
 from flame.safety import SafetyDenied
-from flame.types import Effort
+from flame.types import Effort, Plan
 
 
 def _fake_agent() -> Path:
@@ -36,6 +44,8 @@ class LoopTests(unittest.TestCase):
         os.environ.pop("FLAME_FAKE_ACT_TIMEOUT", None)
         os.environ.pop("FLAME_FAKE_BAD_EVIDENCE", None)
         os.environ.pop("FLAME_FAKE_USE_LEDGER", None)
+        os.environ.pop("FLAME_FAKE_MUTATE_PLAN", None)
+        os.environ.pop("FLAME_FAKE_MUTATE_VERIFY", None)
         self.root = Path(__file__).resolve().parent / ".tmp"
         self.root.mkdir(exist_ok=True)
 
@@ -439,6 +449,117 @@ class LoopTests(unittest.TestCase):
         self.assertFalse(verify.passed)
         self.assertFalse(verify.evidence_ok)
         self.assertTrue(verify.retry)
+
+    def test_restore_plan_skips_write_when_canonical(self) -> None:
+        workspace = self._workspace("restore_plan_skip")
+        flame = workspace / ".flame"
+        flame.mkdir()
+        plan = Plan(
+            goal="g",
+            approach="a",
+            constraints=["c"],
+            verify_points=["v"],
+            summary="s",
+        )
+        path = flame / "plan.json"
+        _write_plan(path, plan)
+        mtime = path.stat().st_mtime
+        gaps = _restore_plan_if_mutated(flame, plan)
+        self.assertEqual(gaps, [])
+        self.assertEqual(path.stat().st_mtime, mtime)
+
+    def test_restore_plan_rewrites_extra_keys(self) -> None:
+        workspace = self._workspace("restore_plan_extra")
+        flame = workspace / ".flame"
+        flame.mkdir()
+        plan = Plan(
+            goal="g",
+            approach="a",
+            constraints=[],
+            verify_points=["v"],
+            summary="s",
+        )
+        path = flame / "plan.json"
+        _write_plan(path, plan)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["answer"] = "stashed"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        gaps = _restore_plan_if_mutated(flame, plan)
+        self.assertTrue(any("extra keys" in g and "answer" in g for g in gaps))
+        restored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn("answer", restored)
+        self.assertEqual(restored["goal"], "g")
+
+    def test_restore_plan_rewrites_allowed_field_change(self) -> None:
+        workspace = self._workspace("restore_plan_fields")
+        flame = workspace / ".flame"
+        flame.mkdir()
+        plan = Plan(
+            goal="original request",
+            approach="a",
+            constraints=[],
+            verify_points=["v"],
+            summary="s",
+        )
+        path = flame / "plan.json"
+        _write_plan(path, plan)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["goal"] = "proxy success"
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        gaps = _restore_plan_if_mutated(flame, plan)
+        self.assertTrue(any("rewritten during act" in g for g in gaps))
+        restored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(restored["goal"], "original request")
+
+    def test_restore_verify_leaves_untouched_file(self) -> None:
+        workspace = self._workspace("restore_verify_ok")
+        flame = workspace / ".flame"
+        flame.mkdir()
+        path = flame / "verify.json"
+        path.write_bytes(b'{"points_met": true}\n')
+        before = path.read_bytes()
+        mtime = path.stat().st_mtime
+        gaps = _restore_verify_if_mutated(flame, before)
+        self.assertEqual(gaps, [])
+        self.assertEqual(path.stat().st_mtime, mtime)
+
+    def test_restore_verify_removes_act_created_file(self) -> None:
+        workspace = self._workspace("restore_verify_created")
+        flame = workspace / ".flame"
+        flame.mkdir()
+        path = flame / "verify.json"
+        path.write_text('{"hacked": true}\n', encoding="utf-8")
+        gaps = _restore_verify_if_mutated(flame, None)
+        self.assertEqual(gaps, ["verify.json was written during act"])
+        self.assertFalse(path.exists())
+
+    def test_restore_verify_restores_prior_bytes(self) -> None:
+        workspace = self._workspace("restore_verify_prior")
+        flame = workspace / ".flame"
+        flame.mkdir()
+        path = flame / "verify.json"
+        before = b'{"points_met": false}\n'
+        path.write_bytes(before)
+        path.write_bytes(b'{"hacked": true}\n')
+        gaps = _restore_verify_if_mutated(flame, before)
+        self.assertEqual(gaps, ["verify.json was rewritten during act"])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_act_mutating_plan_fails_evidence_and_restores(self) -> None:
+        os.environ["FLAME_FAKE_MUTATE_PLAN"] = "1"
+        workspace = self._workspace("act_mutate_plan")
+        result = run(
+            "create done.txt",
+            config=self._cfg(workspace),
+            progress=Progress(enabled=False),
+        )
+        self.assertFalse(result.passed)
+        self.assertFalse(result.verify.evidence_ok if result.verify else False)
+        plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
+        self.assertNotIn("answer", plan)
+        self.assertTrue(
+            any("extra keys" in g for g in (result.verify.evidence_gaps if result.verify else []))
+        )
 
     def test_content_failure_keeps_model_retry_false(self) -> None:
         verify = _verify_from_payload(

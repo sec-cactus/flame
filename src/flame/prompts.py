@@ -188,7 +188,7 @@ JSON schema (no extra keys):
   "approach": "how to get there this cycle; first sentence is the load that if wrong fails the task",
   "summary": "1–2 plain sentences for the user: this cycle's plan in everyday language (no JSON, ≤120 chars)",
   "constraints": ["must / must not, from original and brief"],
-  "verify_points": ["concrete min-fail checks, ideally runnable"]{ledger_schema}}}
+  "verify_points": ["concrete min-fail checks, ideally runnable — not file mtimes"]{ledger_schema}}}
 You may also print the same JSON. Do not use a separate planning UI instead of this file.
 """
 
@@ -227,7 +227,8 @@ Approach:
 {plan.approach or "(none — do the original request)"}
 Constraints:
 {constraints}
-Do not add keys to `.flame/plan.json`. The user's reply belongs in `answer.md`.
+Do not create or modify `.flame/plan.json` or `.flame/verify.json`. Those files belong to plan and verify; if the plan is wrong, leave it for the next plan cycle.
+The user's reply belongs in `answer.md`.
 Write or replace `answer.md` (workspace root or `.flame/answer.md`) this cycle.
 The UI displays that file and nothing else as the answer.
 """
@@ -373,8 +374,7 @@ Two contracts only:
 2. verify_points — actually run min-fail checks. A check that must fail if the work is wrong.
 
 This cycle must have written or replaced answer.md (workspace root or `.flame/answer.md`).
-A leftover answer.md older than this cycle's `.flame/plan.json` is not this cycle's answer.
-The harness checks that file's modification time against plan.json.
+Judge that file's content. The harness already checks it was written this cycle; do not use file mtimes as verify_points, and do not fail evidence_ok because live answer.md is older than live plan.json.
 
 Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
 In each checks[] line, cite handles explicitly: `path: re.json …`, `url: …`, or a backtick command. Use workspace-relative paths only (not host absolute paths or container-only prefixes like app/ unless that directory exists).
