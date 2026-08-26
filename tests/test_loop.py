@@ -46,6 +46,7 @@ class LoopTests(unittest.TestCase):
         os.environ.pop("FLAME_FAKE_USE_LEDGER", None)
         os.environ.pop("FLAME_FAKE_MUTATE_PLAN", None)
         os.environ.pop("FLAME_FAKE_MUTATE_VERIFY", None)
+        os.environ.pop("FLAME_FAKE_ANSWER_ONCE", None)
         self.root = Path(__file__).resolve().parent / ".tmp"
         self.root.mkdir(exist_ok=True)
 
@@ -118,6 +119,19 @@ class LoopTests(unittest.TestCase):
         self.assertTrue(brief["decisive_move"])
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
         self.assertIsNone(skill["skill"])
+
+    def test_retry_keeps_first_answer_mtime(self) -> None:
+        os.environ["FLAME_FAKE_FAIL_ONCE"] = "1"
+        os.environ["FLAME_FAKE_ANSWER_ONCE"] = "1"
+        workspace = self._workspace("answer_once")
+        result = run(
+            "create done.txt",
+            config=self._cfg(workspace, Effort.standard),
+            progress=Progress(enabled=False),
+        )
+        self.assertTrue(result.passed, result.output)
+        self.assertGreaterEqual(result.cycles, 2)
+        self.assertTrue((workspace / "answer.md").is_file())
 
     def test_fast_does_not_replan(self) -> None:
         os.environ["FLAME_FAKE_FAIL_ONCE"] = "1"

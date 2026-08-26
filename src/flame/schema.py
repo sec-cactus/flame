@@ -188,18 +188,20 @@ def strip_to_allowed(payload: dict[str, Any], allowed: frozenset[str]) -> dict[s
 
 
 def answer_md_path(workspace: Path) -> Path | None:
-    """Same preference as the job UI: `.flame/answer.md`, then workspace `answer.md`."""
-    flame = workspace / ".flame" / "answer.md"
-    if flame.is_file():
-        return flame
-    root = workspace / "answer.md"
-    if root.is_file():
-        return root
-    return None
+    """Newer of `.flame/answer.md` and workspace `answer.md` (same files the UI shows)."""
+    found: list[Path] = []
+    for path in (workspace / ".flame" / "answer.md", workspace / "answer.md"):
+        if path.is_file():
+            found.append(path)
+    if not found:
+        return None
+    if len(found) == 1:
+        return found[0]
+    return max(found, key=lambda path: path.stat().st_mtime)
 
 
 def audit_answer_vs_plan(workspace: Path, *, plan_mtime: float) -> list[str]:
-    """answer.md must exist and not be older than this cycle's plan-phase snapshot."""
+    """answer.md must exist and not be older than this round's first plan.json."""
     path = answer_md_path(workspace)
     if path is None:
         return [
@@ -212,7 +214,7 @@ def audit_answer_vs_plan(workspace: Path, *, plan_mtime: float) -> list[str]:
     if mtime < plan_mtime - _MTIME_SLACK:
         rel = path.name if path.parent.name != ".flame" else ".flame/answer.md"
         return [
-            f"{rel} is older than this cycle's plan.json "
+            f"{rel} is older than this round's plan.json "
             "(leftover file is not this round's answer)"
         ]
     return []

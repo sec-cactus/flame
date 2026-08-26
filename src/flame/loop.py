@@ -258,6 +258,7 @@ def run(
     plan: Plan | None = None
     verify: VerifyResult | None = None
     last_text = ""
+    round_plan_mtime: float | None = None
 
     for cycle in range(1, cycles + 1):
         cap = f"cycle {cycle}"
@@ -283,6 +284,8 @@ def run(
             plan.use_ledger = None
         _write_plan(flame_dir / "plan.json", plan)
         plan_mtime = (flame_dir / "plan.json").stat().st_mtime
+        if round_plan_mtime is None:
+            round_plan_mtime = plan_mtime
         skill = _act_skill(cfg.effort, plan)
         progress.note("goal: original (harness-forced)")
         if plan.degraded:
@@ -417,7 +420,7 @@ def run(
             workspace=cfg.workspace,
             cycle_trace=cycle_trace,
             act_note=act_note,
-            plan_mtime=plan_mtime,
+            plan_mtime=round_plan_mtime,
             schema_gaps=schema_gaps,
         )
         last_text = act_output

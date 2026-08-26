@@ -214,7 +214,9 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
                     encoding="utf-8",
                 )
             (workspace / "done.txt").write_text("ok\n", encoding="utf-8")
-            (workspace / "answer.md").write_text("ok\n", encoding="utf-8")
+            answer = workspace / "answer.md"
+            if os.environ.get("FLAME_FAKE_ANSWER_ONCE") != "1" or not answer.is_file():
+                answer.write_text("ok\n", encoding="utf-8")
             (flame_dir / "act.json").write_text(
                 json.dumps(
                     {

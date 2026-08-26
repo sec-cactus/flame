@@ -123,7 +123,7 @@ class PromptSkillTests(unittest.TestCase):
         self.assertIn("Do not create or modify `.flame/plan.json` or `.flame/verify.json`", text)
         self.assertNotIn("Do not add keys to `.flame/plan.json`", text)
         self.assertIn("verbatim copy of the original", prompts.plan_prompt("orig"))
-        self.assertIn("not file mtimes", prompts.plan_prompt("orig"))
+        self.assertIn("Do not put plan.json", prompts.plan_prompt("orig"))
 
     def test_verify_uses_original_and_points(self) -> None:
         text = prompts.verify_prompt("orig", self.plan)

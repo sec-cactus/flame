@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from flame.schema import (
+    answer_md_path,
     audit_answer_vs_plan,
     extra_keys,
     validate_plan_payload,
@@ -78,6 +79,26 @@ class SchemaTests(unittest.TestCase):
         self.assertTrue(gaps)
         leftover.write_text("new\n", encoding="utf-8")
         os.utime(leftover, (plan_mtime + 1, plan_mtime + 1))
+        self.assertEqual(audit_answer_vs_plan(root, plan_mtime=plan_mtime), [])
+
+    def test_answer_prefers_newer_file(self) -> None:
+        root = Path(__file__).resolve().parent / ".tmp" / "schema_newer_answer"
+        if root.exists():
+            import shutil
+
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        flame = root / ".flame"
+        flame.mkdir()
+        (flame / "plan.json").write_text("{}\n", encoding="utf-8")
+        plan_mtime = (flame / "plan.json").stat().st_mtime
+        stale = flame / "answer.md"
+        stale.write_text("old flame\n", encoding="utf-8")
+        os.utime(stale, (plan_mtime - 120, plan_mtime - 120))
+        fresh = root / "answer.md"
+        fresh.write_text("new root\n", encoding="utf-8")
+        os.utime(fresh, (plan_mtime + 1, plan_mtime + 1))
+        self.assertEqual(answer_md_path(root), fresh)
         self.assertEqual(audit_answer_vs_plan(root, plan_mtime=plan_mtime), [])
 
 

@@ -146,6 +146,20 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertTrue(ok.ok, ok.gaps)
 
+    def test_normalize_work_prefix(self) -> None:
+        workspace = Path(__file__).resolve().parent / ".tmp_evidence"
+        flame = workspace / ".flame"
+        flame.mkdir(parents=True, exist_ok=True)
+        (flame / "plan.json").write_text("{}\n", encoding="utf-8")
+        trace = ToolTrace(paths={".flame/plan.json", "/work/.flame/plan.json"})
+        ok = audit_checks(
+            ["path: work/.flame/plan.json schema ok"],
+            workspace=workspace,
+            trace=trace,
+            fail_open_if_no_trace=False,
+        )
+        self.assertTrue(ok.ok, ok.gaps)
+
     def test_normalize_absolute_under_workspace(self) -> None:
         workspace = Path(__file__).resolve().parent / ".tmp_evidence"
         workspace.mkdir(exist_ok=True)

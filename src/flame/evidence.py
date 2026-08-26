@@ -198,12 +198,13 @@ def _normalize_path(path: str, workspace: Path) -> str:
             pass
     if raw.startswith("./"):
         rel = raw[2:]
-    elif raw.startswith("/app/") and (ws / raw[5:]).exists():
-        return raw[5:]
     else:
         rel = raw
-    if rel.startswith("app/") and (ws / rel[4:]).exists():
-        return rel[4:]
+    for prefix in ("/app/", "/work/", "app/", "work/"):
+        if rel.startswith(prefix):
+            stripped = rel[len(prefix) :]
+            if stripped and (workspace / stripped).exists():
+                return stripped
     return rel
 
 

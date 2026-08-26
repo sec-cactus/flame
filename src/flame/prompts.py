@@ -178,7 +178,7 @@ When inputs conflict, this order is strict:
 Act contract: goal, approach, constraints{', and use_ledger' if ask_use_ledger else ''}.
 Goal MUST be the original user request verbatim (copy field [1]). The harness overwrites goal to original after you write — do not invent a proxy success sentence.
 Approach is how to attack this cycle, not a second job.
-Verify contract: verify_points (min-fail checks). Verify also receives the original request from the harness; you do not restate it as a new job.
+Verify contract: verify_points (min-fail checks of the user-visible work, typically answer.md). Do not put plan.json, act.json, JSON key order, or file mtimes in verify_points — the harness owns those.
 {ledger_rules}
 {extra}
 Write ONLY `.flame/plan.json` (create `.flame/` if needed). Do not change any other files.
@@ -188,7 +188,7 @@ JSON schema (no extra keys):
   "approach": "how to get there this cycle; first sentence is the load that if wrong fails the task",
   "summary": "1–2 plain sentences for the user: this cycle's plan in everyday language (no JSON, ≤120 chars)",
   "constraints": ["must / must not, from original and brief"],
-  "verify_points": ["concrete min-fail checks, ideally runnable — not file mtimes"]{ledger_schema}}}
+  "verify_points": ["concrete min-fail checks of the deliverable, ideally runnable"]{ledger_schema}}}
 You may also print the same JSON. Do not use a separate planning UI instead of this file.
 """
 
@@ -229,7 +229,7 @@ Constraints:
 {constraints}
 Do not create or modify `.flame/plan.json` or `.flame/verify.json`. Those files belong to plan and verify; if the plan is wrong, leave it for the next plan cycle.
 The user's reply belongs in `answer.md`.
-Write or replace `answer.md` (workspace root or `.flame/answer.md`) this cycle.
+Write or replace `answer.md` (workspace root or `.flame/answer.md`) this round.
 The UI displays that file and nothing else as the answer.
 """
     if skill == "j-space":
@@ -374,7 +374,8 @@ Two contracts only:
 2. verify_points — actually run min-fail checks. A check that must fail if the work is wrong.
 
 This cycle must have written or replaced answer.md (workspace root or `.flame/answer.md`).
-Judge that file's content. The harness already checks it was written this cycle; do not use file mtimes as verify_points, and do not fail evidence_ok because live answer.md is older than live plan.json.
+Judge that file's content against the original request. The harness already checks it was written this round; do not use file mtimes as verify_points, and do not fail because live answer.md is older than live plan.json.
+Do not fail on plan.json key order or the goal field — the harness writes those.
 
 Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
 In each checks[] line, cite handles explicitly: `path: re.json …`, `url: …`, or a backtick command. Use workspace-relative paths only (not host absolute paths or container-only prefixes like app/ unless that directory exists).
