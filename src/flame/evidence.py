@@ -230,15 +230,95 @@ def _audit_url(url: str, trace: ToolTrace) -> list[str]:
     return [f"url not touched in this cycle's tools: {url}"]
 
 
+_CD_PREFIX = re.compile(
+    r"^(?:cd\s+(?:--\s+)?(?:'[^']+'|\"[^\"]+\"|\S+)\s*(?:&&|;)\s*)+"
+)
+_CMD_SPLIT = re.compile(r"\s*(?:(?<!\|)\|(?!\|)|&&|;)\s*")
+_CMD_SEG_MIN = 8
+
+
+def _collapse_cmd(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _bare_command(text: str) -> str:
+    return _CD_PREFIX.sub("", _collapse_cmd(text)).strip()
+
+
+def _command_segments(text: str) -> list[str]:
+    bare = _bare_command(text)
+    if not bare:
+        return []
+    return [part for part in _CMD_SPLIT.split(bare) if part]
+
+
+def _cmd_substr(a: str, b: str) -> bool:
+    """Substring either way, but the shorter side must be long enough to count."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return len(shorter) >= _CMD_SEG_MIN and shorter in longer
+
+
+def _command_pair_hit(needle: str, seen: str) -> bool:
+    """True if the cited command is the same work as a recorded tool command.
+
+    Strips ``cd dir &&`` prefixes, then matches the longest pipe/&& segment
+    of the citation against segments of the recording (substring either way).
+    Extra filters like ``| grep -v _test`` on the check do not fail the hit.
+    """
+    n = _collapse_cmd(needle)
+    s = _collapse_cmd(seen)
+    if not n or not s:
+        return False
+    if _cmd_substr(n, s):
+        return True
+    n_bare = _bare_command(n)
+    s_bare = _bare_command(s)
+    if _cmd_substr(n_bare, s_bare):
+        return True
+    n_segs = _command_segments(n)
+    if not n_segs:
+        return False
+    primary = max(n_segs, key=len)
+    if len(primary) < _CMD_SEG_MIN:
+        return False
+    hay: list[str] = []
+    if s_bare:
+        hay.append(s_bare)
+    for seg in _command_segments(s):
+        if len(seg) >= _CMD_SEG_MIN and seg not in hay:
+            hay.append(seg)
+    return any(_cmd_substr(primary, chunk) for chunk in hay)
+
+
+def _command_in_blob(command: str, blob: str) -> bool:
+    """One-way: cited command / longest segment appears in a raw tool-event blob."""
+    n = _collapse_cmd(command)
+    s = _collapse_cmd(blob)
+    if not n or not s:
+        return False
+    if len(n) >= _CMD_SEG_MIN and n in s:
+        return True
+    n_bare = _bare_command(n)
+    if len(n_bare) >= _CMD_SEG_MIN and n_bare in s:
+        return True
+    segs = _command_segments(n)
+    if not segs:
+        return False
+    primary = max(segs, key=len)
+    return len(primary) >= _CMD_SEG_MIN and primary in s
+
+
 def _audit_command(command: str, trace: ToolTrace) -> list[str]:
-    needle = " ".join(command.split())
     for seen in trace.commands:
-        if needle in seen or seen in needle:
+        if _command_pair_hit(command, seen):
             return []
-    # also allow command text appearing inside path blobs / raw args via paths set? no
     for raw in trace.raw:
         blob = json.dumps(raw, ensure_ascii=False)
-        if needle and needle in blob:
+        if _command_in_blob(command, blob):
             return []
     return [f"command not seen in this cycle's tools: {command}"]
 

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from flame.evidence import (
+    AuditResult,
     ToolTrace,
     audit_checks,
     collect_tool_event,
@@ -189,6 +190,61 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertFalse(bad.ok)
         self.assertTrue(any("no explicit handle" in g for g in bad.gaps))
+
+    def _cmd_audit(self, check_cmd: str, recorded: str) -> AuditResult:
+        workspace = Path(__file__).resolve().parent / ".tmp_evidence"
+        workspace.mkdir(exist_ok=True)
+        return audit_checks(
+            [f"`{check_cmd}` ran"],
+            workspace=workspace,
+            trace=ToolTrace(commands={recorded}),
+            fail_open_if_no_trace=False,
+        )
+
+    def test_command_cd_prefix_and_pipe_filter(self) -> None:
+        """j0036-style: recorded cd+grep, check adds `. | grep -v _test`."""
+        recorded = (
+            'cd /tmp/opencode/gitea-src/pre && grep -rn \'NewCommand("apply"\' '
+            "--include='*.go'"
+        )
+        cited = (
+            'grep -rn \'NewCommand("apply"\' --include=\'*.go\' . | grep -v _test'
+        )
+        ok = self._cmd_audit(cited, recorded)
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_command_flag_order_still_hits_core_grep(self) -> None:
+        recorded = (
+            "cd /tmp/opencode/gitea-src/pre && "
+            "grep -n 'NewCommand(\"apply\"' --include='*.go'"
+        )
+        cited = (
+            "grep -n 'NewCommand(\"apply\"' --include='*.go' -r . | grep -v _test"
+        )
+        ok = self._cmd_audit(cited, recorded)
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_command_unrelated_still_fails(self) -> None:
+        bad = self._cmd_audit("grep -rn 'NewCommand(\"apply\"'", "pytest -q")
+        self.assertFalse(bad.ok)
+        self.assertTrue(any("command not seen" in g for g in bad.gaps))
+
+    def test_command_cd_prefix_pytest(self) -> None:
+        ok = self._cmd_audit("pytest -q", "cd /work && pytest -q")
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_command_exact_pytest(self) -> None:
+        ok = self._cmd_audit("pytest -q", "pytest -q")
+        self.assertTrue(ok.ok, ok.gaps)
+
+    def test_command_short_filter_alone_fails(self) -> None:
+        recorded = (
+            'cd /tmp/opencode/gitea-src/pre && grep -rn \'NewCommand("apply"\' '
+            "--include='*.go'"
+        )
+        bad = self._cmd_audit("grep -v _test", recorded)
+        self.assertFalse(bad.ok)
+        self.assertTrue(any("command not seen" in g for g in bad.gaps))
 
 
 if __name__ == "__main__":

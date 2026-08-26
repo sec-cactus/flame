@@ -379,6 +379,7 @@ Do not fail on plan.json key order or the goal field — the harness writes thos
 
 Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
 In each checks[] line, cite handles explicitly: `path: re.json …`, `url: …`, or a backtick command. Use workspace-relative paths only (not host absolute paths or container-only prefixes like app/ unless that directory exists).
+A backtick command should copy a fragment that already appears in this cycle's tool trace; do not invent a longer pipeline than what ran.
 The harness audits that cited handles exist and were touched this cycle; it does not re-run your work.
 retry=true means continue; retry=false means stop burning budget.
 The harness finishes verify with an evidence audit of checks (exist + touched this cycle). That audit is part of verify — not a side gate.
