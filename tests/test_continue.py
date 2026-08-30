@@ -69,7 +69,7 @@ class ContinueRunTests(LoopTests):
 
     def test_continue_run_hint_and_verify(self) -> None:
         workspace = self._seed_graph_workspace("continue_ok")
-        cfg = self._cfg(workspace, Effort.max)
+        cfg = self._cfg(workspace, Effort.graph)
         run_dir = workspace / ".fact-graph" / "runs" / "flame-act-c1"
 
         def fake_subprocess(cmd, **kwargs):
@@ -105,7 +105,7 @@ class ContinueRunTests(LoopTests):
 
     def test_continue_requires_graph_run(self) -> None:
         workspace = self._workspace("continue_missing")
-        cfg = self._cfg(workspace, Effort.max)
+        cfg = self._cfg(workspace, Effort.graph)
         with self.assertRaises(Exception):
             continue_run("nope", config=cfg)
 

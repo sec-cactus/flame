@@ -145,13 +145,7 @@ def add_intent(
     from_ids: list[str],
     description: str,
     creator: str,
-    *,
-    use_ledger: bool = False,
 ) -> dict:
-    # Ledger only when this will be the sole open intent (path settled).
-    open_before = len(open_intents(board))
-    if use_ledger and open_before != 0:
-        use_ledger = False
     intent = {
         "id": _next_id(board["intents"], "i"),
         "from": list(from_ids),
@@ -159,7 +153,6 @@ def add_intent(
         "description": description.strip(),
         "creator": creator,
         "worker": None,
-        "use_ledger": bool(use_ledger),
         "created_at": now_iso(),
         "concluded_at": None,
     }
@@ -243,7 +236,6 @@ def render_graph_yaml(board: dict) -> str:
         lines.append("    description: |-")
         lines += _yaml_block(intent["description"], 6)
         lines.append(f'    creator: {json.dumps(intent["creator"], ensure_ascii=False)}')
-        lines.append(f'    use_ledger: {json.dumps(bool(intent.get("use_ledger")))}')
         lines.append(f'    worker: {json.dumps(intent["worker"])}')
     return "\n".join(lines)
 
@@ -434,54 +426,6 @@ def load_config(path: Path) -> Config:
         task_timeouts=timeouts,
         workers=workers,
     )
-
-
-def resolve_jspace_dir() -> Path | None:
-    """Locate j-space skill root (same idea as Flame skills.jspace_dir, no Flame import)."""
-    env = os.environ.get("FLAME_JSPACE", "").strip()
-    candidates: list[Path] = []
-    if env:
-        candidates.append(Path(env).expanduser())
-    home = Path.home()
-    candidates.extend(
-        [
-            home / ".cursor" / "skills-cursor" / "j-space",
-            home / ".cursor" / "skills" / "j-space",
-        ]
-    )
-    for path in candidates:
-        if (path / "SKILL.md").is_file():
-            return path.resolve()
-    return None
-
-
-def intent_allows_ledger(board: dict, intent: dict) -> bool:
-    if not intent.get("use_ledger"):
-        return False
-    if is_bootstrap_intent(intent):
-        return False
-    opens = open_intents(board)
-    return len(opens) == 1 and opens[0]["id"] == intent["id"]
-
-
-def ledger_root_for(run_dir: Path, intent_id: str) -> Path:
-    return (run_dir / "ledgers" / intent_id).resolve()
-
-
-def ledger_explore_addendum(*, jspace: Path, ledger_root: Path, workspace_cwd: str) -> str:
-    script = jspace / "scripts" / "jspace.py"
-    return f"""
-# Ledger (optional deep pass for this sole open intent)
-
-use_ledger=true for this intent. Before exploring:
-1. Read `{jspace}/SKILL.md` and follow a `loop` pass.
-2. Keep the j-space ledger **only** under `{ledger_root}/` (create it if needed).
-   Run the controller with that directory as cwd, e.g.
-   `mkdir -p {ledger_root} && cd {ledger_root} && python3 {script} note --goal "..." --next "..."`
-   Never write `{workspace_cwd}/.jspace/`.
-3. Project tools (read/search/shell against the repo) still use workspace `{workspace_cwd}`.
-4. Final JSON output rules above still apply — ledger is for holding state, not a substitute for the fact description.
-"""
 
 
 def render_prompt(group: str, name: str, values: dict[str, str]) -> str:
@@ -738,7 +682,7 @@ def valid_description(result: PhaseResult) -> str | None:
 
 
 def valid_reason(result: PhaseResult, legal_fact_ids: set[str]) -> tuple | str | None:
-    """返回 ("complete", from_ids, desc) / ("intent", from_ids, desc, use_ledger) / "noop" / None(非法)。"""
+    """返回 ("complete", from_ids, desc) / ("intent", from_ids, desc) / "noop" / None(非法)。"""
     data = (result.parsed or {}).get("data")
     if not isinstance(data, dict):
         return None
@@ -771,8 +715,7 @@ def valid_reason(result: PhaseResult, legal_fact_ids: set[str]) -> tuple | str |
             return None
         if any(fid not in legal_fact_ids or fid == "goal" for fid in from_ids):
             return None
-        use_ledger = bool(node.get("use_ledger"))
-        return "intent", [fid.strip() for fid in from_ids], desc, use_ledger
+        return "intent", [fid.strip() for fid in from_ids], desc
     return None
 
 
@@ -869,11 +812,8 @@ class Orchestrator:
 
     def _submit(self, task_type: str, phase: str, worker: WorkerConfig,
                 prompt_name: str, values: dict[str, str],
-                intent_id: str | None, session_id: str,
-                prompt_suffix: str = "") -> None:
+                intent_id: str | None, session_id: str) -> None:
         prompt = render_prompt(self.config.prompt_group, prompt_name, values)
-        if prompt_suffix:
-            prompt = prompt.rstrip() + "\n" + prompt_suffix
         timeout_key = "timeout" if phase == "main" else "conclude_timeout"
         timeout = self.config.task_timeouts[task_type][timeout_key]
         if not worker.is_mock and phase == "main":
@@ -905,8 +845,7 @@ class Orchestrator:
             "fact_ids": json.dumps(fact_ids_for_prompt(self.board), ensure_ascii=False),
             "open_intents": json.dumps(
                 [{"id": i["id"], "from": i["from"], "description": i["description"],
-                  "creator": i["creator"], "worker": i["worker"],
-                  "use_ledger": bool(i.get("use_ledger"))} for i in opens],
+                  "creator": i["creator"], "worker": i["worker"]} for i in opens],
                 ensure_ascii=False),
         }
 
@@ -959,30 +898,6 @@ class Orchestrator:
             values = self._prompt_values()
             values["intent_id"] = intent["id"]
             values["intent_description"] = intent["description"]
-            suffix = ""
-            if intent_allows_ledger(self.board, intent):
-                jspace = resolve_jspace_dir()
-                if jspace is None:
-                    log("intent %s use_ledger=true but j-space missing; exploring without ledger",
-                        intent["id"])
-                    self.event("ledger_skipped", intent=intent["id"], reason="jspace_missing")
-                else:
-                    root = ledger_root_for(self.run_dir, intent["id"])
-                    root.mkdir(parents=True, exist_ok=True)
-                    suffix = ledger_explore_addendum(
-                        jspace=jspace,
-                        ledger_root=root,
-                        workspace_cwd=self.cwd,
-                    )
-                    self.event("ledger_mounted", intent=intent["id"], ledger=str(root))
-                    log("intent %s ledger → %s", intent["id"], root)
-            elif intent.get("use_ledger"):
-                self.event(
-                    "ledger_skipped",
-                    intent=intent["id"],
-                    reason="open_intents!=1",
-                    open=len(open_intents(self.board)),
-                )
             self._submit(
                 "explore",
                 "main",
@@ -991,7 +906,6 @@ class Orchestrator:
                 values,
                 intent["id"],
                 uuid.uuid4().hex,
-                prompt_suffix=suffix,
             )
             dispatched += 1
         return dispatched
@@ -1177,24 +1091,21 @@ class Orchestrator:
                     _, from_ids, desc = outcome
                     self._complete_run(from_ids, desc, record.worker.name)
                 else:
-                    _, from_ids, desc, use_ledger = outcome
+                    _, from_ids, desc = outcome
                     intent = add_intent(
                         self.board,
                         from_ids,
                         desc,
                         record.worker.name,
-                        use_ledger=use_ledger,
                     )
                     self.event(
                         "intent_declared",
                         intent=intent["id"],
                         worker=record.worker.name,
-                        use_ledger=bool(intent.get("use_ledger")),
                     )
                     log(
-                        "新 intent %s use_ledger=%s: %s",
+                        "新 intent %s: %s",
                         intent["id"],
-                        bool(intent.get("use_ledger")),
                         desc[:100],
                     )
                 return

@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     flame_dir.mkdir(parents=True, exist_ok=True)
 
     phase = "unknown"
-    for name in ("quadrants", "factors", "meld", "plan", "act", "verify"):
+    for name in ("quadrants", "factors", "plan", "act", "verify"):
         if f"[Flame phase: {name}]" in prompt:
             phase = name
             break
@@ -72,7 +72,6 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if os.environ.get("FLAME_FAKE_PREPROCESS_FAIL") == "1" and phase in {
-        "meld",
         "quadrants",
         "factors",
     }:
@@ -165,23 +164,6 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
                 "summary": "关键在 workspace 能否写入 done.txt",
             }
         )
-    if phase == "meld":
-        if "[Flame meld role: judge]" in prompt:
-            return json.dumps(
-                {
-                    "consensus": [{"point": "deliverable is a file", "models": ["primary_analyst"]}],
-                    "contradictions": [],
-                    "unique_insights": [],
-                    "blind_spots": [{"point": "format of done.txt", "importance": "medium"}],
-                    "verification_needed": [],
-                }
-            )
-        role = "panel"
-        for name in ("primary_analyst", "critical_reviewer", "coverage_reviewer"):
-            if f"[Flame meld role: {name}]" in prompt:
-                role = name
-                break
-        return f"{role}: the task is to leave a verify signal in the workspace."
     if phase == "plan":
         return json.dumps(
             {
@@ -191,13 +173,34 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
                 "constraints": ["do not delete .flame"],
                 "verify_points": ["done.txt exists"],
                 **(
-                    {"use_ledger": os.environ.get("FLAME_FAKE_USE_LEDGER", "1") != "0"}
-                    if "use_ledger" in prompt
+                    {"use_jspace": os.environ.get("FLAME_FAKE_USE_JSPACE", "1") != "0"}
+                    if "use_jspace" in prompt
+                    and os.environ.get("FLAME_FAKE_OMIT_USE_JSPACE") != "1"
                     else {}
                 ),
             }
         )
     if phase == "act":
+        if "[Flame meld role: judge]" in prompt:
+            return json.dumps(
+                {
+                    "winner": "primary_analyst",
+                    "consensus": [{"point": "deliverable is a file", "models": ["primary_analyst"]}],
+                    "contradictions": [],
+                    "unique_insights": [],
+                    "blind_spots": [],
+                    "verification_needed": [],
+                    "finalizer_guidance": {
+                        "must_include": ["done.txt"],
+                        "must_preserve_uncertainty": [],
+                        "must_not_overstate": [],
+                    },
+                }
+            )
+        if "[Flame meld role: finalizer]" not in prompt:
+            for name in ("primary_analyst", "critical_reviewer", "coverage_reviewer"):
+                if f"[Flame meld role: {name}]" in prompt:
+                    return f"{name}: the task is to leave a verify signal in the workspace."
         if force:
             if os.environ.get("FLAME_FAKE_MUTATE_PLAN") == "1":
                 plan_path = flame_dir / "plan.json"

@@ -15,9 +15,9 @@ Minimal **plan → act → verify** harness over a local coding agent CLI. Suppo
 pip install -e .
 ```
 
-### Act skills (high / max)
+### Act skills (ledger / graph)
 
-**fact-graph** ships in the package (used on **max**). **j-space does not** — install it before `effort=high` (default ledger):
+**fact-graph** ships in the package (used on **graph**). **j-space does not** — install it before `effort=ledger` (default j-space):
 
 ```bash
 git clone --depth 1 https://github.com/Tiger3807861189/J-Space-Cognition-Suite-V3.6
@@ -33,7 +33,7 @@ flame skills
 ```bash
 flame run "fix the failing tests"
 flame run "summarize this repo" --effort fast --workspace .
-flame run "…" --effort max --model auto
+flame run "…" --effort graph --model auto
 # OpenCode backend (model is provider/model):
 flame run "…" --agent-backend opencode --model opencode-go/deepseek-v4-flash
 ```
@@ -41,18 +41,18 @@ flame run "…" --agent-backend opencode --model opencode-go/deepseek-v4-flash
 **Progress → stderr** (`▶ plan` / tools / `✓ passed`). **Final answer → stdout** (usually last act text; `retry=false` → diagnosis).
 
 ```
-▶ preprocess         # fast skips; standard/high quadrants+factors; max adds meld
+▶ preprocess         # fast skips; standard/ledger/meld/graph: quadrants+factors
   · quadrants
   · factors
 ▶ plan  cycle 1
   · goal: original (harness-forced)
-  · skill=j-space                 # high default; max → fact-graph + harness init
+  · skill=j-space                 # ledger default; graph → fact-graph + harness init
 ▶ act   cycle 1
 ▶ verify  cycle 1
 ✓ passed in 1 cycle(s)
 ```
 
-`plan.goal` is always the user request (harness overwrites). On **max**, Flame writes `.flame/graph_seed.json` and inits `.fact-graph/runs/flame-act-cN/` before act; act only `run`s the orchestrator. Verify audits evidence handles in `checks` (exist + touched this cycle) — not a test replay.
+`plan.goal` is always the user request (harness overwrites). On **graph**, Flame writes `.flame/graph_seed.json` and inits `.fact-graph/runs/flame-act-cN/` before act; act only `run`s the orchestrator. Verify audits evidence handles in `checks` (exist + touched this cycle) — not a test replay.
 
 ## Effort
 
@@ -60,12 +60,13 @@ flame run "…" --agent-backend opencode --model opencode-go/deepseek-v4-flash
 |---|---|---|---|---|
 | **fast** | skip | no | no | one verify round, then deliver |
 | **standard** (default) | quadrants → factors → `brief.json` | no | no | until verify judges |
-| **high** | same as standard | no | j-space ledger (plan may set `use_ledger=false`) | same |
-| **max** | same + meld first | yes | fact-graph (always) | same |
+| **ledger** | same as standard | no | j-space (plan may set `use_jspace=false`) | same |
+| **meld** | same as standard | no (act fusion instead) | no | 3 panels → judge picks winner → that panel writes `answer.md` |
+| **graph** | same as standard | no | fact-graph (always; no ledger) | same |
 
-**high** deepens one trajectory (direction risk accepted); plan defaults `use_ledger=true`, and turns it off only for short or clearly multi-path approaches. **max** pays for graph coverage / branching — not “strictly stronger high.” Topology is fixed by effort; plan no longer votes `search`.
+**ledger** deepens one trajectory (direction risk accepted); plan defaults `use_jspace=true`, and turns it off only for short or clearly multi-path approaches. **graph** pays for graph coverage / branching — not “strictly stronger ledger.” Topology is fixed by effort; plan no longer votes `search`.
 
-`FLAME_MAX_CYCLES` (default 8) is only a runaway guard for standard/high/max. Aliases: `low`→`fast`, `medium`→`standard`.
+`FLAME_MAX_CYCLES` (default 8) is only a runaway guard for standard/ledger/meld/graph. Aliases: `low`→`fast`, `medium`→`standard`.
 
 ## Degrade floor
 

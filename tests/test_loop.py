@@ -9,6 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
+from flame import budget
 from flame.config import Config
 from flame.loop import (
     FlameError,
@@ -43,7 +44,8 @@ class LoopTests(unittest.TestCase):
         os.environ.pop("FLAME_FAKE_ACT_FAIL", None)
         os.environ.pop("FLAME_FAKE_ACT_TIMEOUT", None)
         os.environ.pop("FLAME_FAKE_BAD_EVIDENCE", None)
-        os.environ.pop("FLAME_FAKE_USE_LEDGER", None)
+        os.environ.pop("FLAME_FAKE_USE_JSPACE", None)
+        os.environ.pop("FLAME_FAKE_OMIT_USE_JSPACE", None)
         os.environ.pop("FLAME_FAKE_MUTATE_PLAN", None)
         os.environ.pop("FLAME_FAKE_MUTATE_VERIFY", None)
         os.environ.pop("FLAME_FAKE_ANSWER_ONCE", None)
@@ -114,7 +116,6 @@ class LoopTests(unittest.TestCase):
         self.assertNotIn("meld", buf.getvalue())
         brief = json.loads((workspace / ".flame" / "brief.json").read_text(encoding="utf-8"))
         self.assertEqual(brief["schema"], "flame.brief.v1")
-        self.assertIsNone(brief["judge"])
         self.assertTrue(brief["quadrants"]["known_unknowns"])
         self.assertTrue(brief["decisive_move"])
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
@@ -191,50 +192,50 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(result.cycles, 1)
         self.assertIn("safety cap", buf.getvalue())
 
-    def test_high_default_uses_jspace(self) -> None:
+    def test_ledger_default_uses_jspace(self) -> None:
         workspace = self._workspace("jspace")
         buf = io.StringIO()
         result = run(
             "create done.txt",
-            config=self._cfg(workspace, Effort.high),
+            config=self._cfg(workspace, Effort.ledger),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
         self.assertEqual(skill["skill"], "j-space")
-        self.assertTrue(skill["use_ledger"])
+        self.assertTrue(skill["use_jspace"])
         self.assertIn("skill=j-space", buf.getvalue())
         plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
-        self.assertTrue(plan["use_ledger"])
+        self.assertTrue(plan["use_jspace"])
 
-    def test_high_can_skip_ledger(self) -> None:
-        os.environ["FLAME_FAKE_USE_LEDGER"] = "0"
+    def test_ledger_can_skip_jspace(self) -> None:
+        os.environ["FLAME_FAKE_USE_JSPACE"] = "0"
         workspace = self._workspace("no_ledger")
         buf = io.StringIO()
         result = run(
             "create done.txt",
-            config=self._cfg(workspace, Effort.high),
+            config=self._cfg(workspace, Effort.ledger),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
         self.assertIsNone(skill["skill"])
-        self.assertFalse(skill["use_ledger"])
-        self.assertIn("use_ledger=false", buf.getvalue())
+        self.assertFalse(skill["use_jspace"])
+        self.assertIn("use_jspace=false", buf.getvalue())
 
-    def test_max_uses_factgraph(self) -> None:
+    def test_graph_uses_factgraph(self) -> None:
         workspace = self._workspace("factgraph")
         buf = io.StringIO()
         task = "create done.txt"
         result = run(
             task,
-            config=self._cfg(workspace, Effort.max),
+            config=self._cfg(workspace, Effort.graph),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
         skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
         self.assertEqual(skill["skill"], "fact-graph")
-        self.assertIsNone(skill["use_ledger"])
+        self.assertIsNone(skill["use_jspace"])
         self.assertIn("skill=fact-graph", buf.getvalue())
         self.assertTrue(skill["factgraph"])
         self.assertEqual(skill["graph_seed"], "graph_seed.json")
@@ -275,19 +276,49 @@ class LoopTests(unittest.TestCase):
                 "constraints": ["must touch disk"],
                 "verify_points": ["done.txt exists"],
             },
-            ask_use_ledger=False,
+            ask_use_jspace=False,
         )
         self.assertEqual(plan.approach, "write the file")
         self.assertEqual(plan.constraints, ["must touch disk"])
         self.assertEqual(plan.verify_points, ["done.txt exists"])
         self.assertFalse(plan.degraded)
 
-    def test_high_brief_without_meld(self) -> None:
+    def test_omitted_use_jspace_stays_none_until_loop(self) -> None:
+        plan = _plan_from(
+            {
+                "goal": "g",
+                "approach": "write the file",
+                "constraints": [],
+                "verify_points": [],
+            },
+            ask_use_jspace=True,
+        )
+        self.assertIsNone(plan.use_jspace)
+        self.assertFalse(budget.use_jspace(Effort.ledger, plan.use_jspace))
+        self.assertTrue(budget.use_jspace(Effort.ledger, True))
+        self.assertFalse(budget.use_jspace(Effort.graph, True))
+
+    def test_ledger_omitted_use_jspace_defaults_true(self) -> None:
+        os.environ["FLAME_FAKE_OMIT_USE_JSPACE"] = "1"
+        workspace = self._workspace("omit_jspace")
+        result = run(
+            "create done.txt",
+            config=self._cfg(workspace, Effort.ledger),
+            progress=Progress(stream=io.StringIO()),
+        )
+        self.assertTrue(result.passed, result.output)
+        skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
+        self.assertEqual(skill["skill"], "j-space")
+        self.assertTrue(skill["use_jspace"])
+        plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
+        self.assertTrue(plan["use_jspace"])
+
+    def test_ledger_brief_without_meld(self) -> None:
         workspace = self._workspace("bsp")
         buf = io.StringIO()
         result = run(
             "make the done file",
-            config=self._cfg(workspace, Effort.high),
+            config=self._cfg(workspace, Effort.ledger),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
@@ -297,32 +328,53 @@ class LoopTests(unittest.TestCase):
         self.assertIn("  · factors", log)
         self.assertNotIn("meld", log)
         brief = json.loads((workspace / ".flame" / "brief.json").read_text(encoding="utf-8"))
-        self.assertIsNone(brief["judge"])
         self.assertEqual(brief["decisive_move"], "whether the workspace accepts writes")
         self.assertLessEqual(len(brief["success_factors"]), 3)
         self.assertFalse((workspace / ".flame" / "task.md").is_file())
         self.assertFalse((workspace / ".flame" / "meld-judge.json").is_file())
         self.assertFalse((workspace / ".flame" / "brief.md").is_file())
 
-    def test_max_meld_then_structured_brief(self) -> None:
-        workspace = self._workspace("meld")
+    def test_meld_act_fusion_writes_answer(self) -> None:
+        workspace = self._workspace("act_meld")
         buf = io.StringIO()
         result = run(
             "make the done file",
-            config=self._cfg(workspace, Effort.max),
+            config=self._cfg(workspace, Effort.meld),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
         log = buf.getvalue()
         self.assertIn("▶ preprocess", log)
-        self.assertIn("meld", log)
         self.assertIn("  · quadrants", log)
         self.assertIn("  · factors", log)
-        self.assertTrue((workspace / ".flame" / "meld-judge.json").is_file())
+        self.assertIn("meld panels", log)
+        self.assertIn("meld judge", log)
+        self.assertIn("meld finalizer", log)
         brief = json.loads((workspace / ".flame" / "brief.json").read_text(encoding="utf-8"))
-        self.assertIsInstance(brief["judge"], dict)
-        self.assertIn("consensus", brief["judge"])
-        self.assertNotIn("decisive_move", brief["judge"])
+        judge = json.loads((workspace / ".flame" / "meld-judge.json").read_text(encoding="utf-8"))
+        self.assertEqual(judge["winner"], "primary_analyst")
+        self.assertIn("finalizer_guidance", judge)
+        self.assertTrue((workspace / "answer.md").is_file())
+        self.assertTrue((workspace / "done.txt").is_file())
+        skill = json.loads((workspace / ".flame" / "act_skill.json").read_text(encoding="utf-8"))
+        self.assertIsNone(skill.get("skill"))
+
+    def test_graph_brief_without_meld(self) -> None:
+        workspace = self._workspace("graph_brief")
+        buf = io.StringIO()
+        result = run(
+            "make the done file",
+            config=self._cfg(workspace, Effort.graph),
+            progress=Progress(stream=buf),
+        )
+        self.assertTrue(result.passed, result.output)
+        log = buf.getvalue()
+        self.assertIn("▶ preprocess", log)
+        self.assertIn("  · quadrants", log)
+        self.assertIn("  · factors", log)
+        self.assertNotIn("meld panels", log)
+        self.assertFalse((workspace / ".flame" / "meld-judge.json").is_file())
+        brief = json.loads((workspace / ".flame" / "brief.json").read_text(encoding="utf-8"))
         self.assertIn("unknown_unknowns", brief["quadrants"])
         self.assertTrue(brief["decisive_move"])
 
@@ -332,7 +384,7 @@ class LoopTests(unittest.TestCase):
         buf = io.StringIO()
         result = run(
             "create done.txt",
-            config=self._cfg(workspace, Effort.max),
+            config=self._cfg(workspace, Effort.graph),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
@@ -342,17 +394,27 @@ class LoopTests(unittest.TestCase):
         self.assertTrue((workspace / ".flame" / "original.md").is_file())
         self.assertTrue((workspace / ".flame" / "plan.json").is_file())
 
-    def test_max_does_not_spawn_refuter(self) -> None:
+    def test_graph_does_not_spawn_refuter(self) -> None:
         workspace = self._workspace("no_refuter")
         buf = io.StringIO()
         result = run(
             "create done.txt",
-            config=self._cfg(workspace, Effort.max),
+            config=self._cfg(workspace, Effort.graph),
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
         self.assertNotIn("▶ refuter", buf.getvalue())
         self.assertEqual(result.cycles, 1)
+
+    def test_max_is_not_an_effort(self) -> None:
+        workspace = self._workspace("no_max")
+        with self.assertRaises(ValueError):
+            Config.load(workspace=workspace, effort="max")
+
+    def test_high_is_not_an_effort(self) -> None:
+        workspace = self._workspace("no_high")
+        with self.assertRaises(ValueError):
+            Config.load(workspace=workspace, effort="high")
 
     def test_verify_abort_does_not_replan(self) -> None:
         os.environ["FLAME_FAKE_ABORT"] = "1"

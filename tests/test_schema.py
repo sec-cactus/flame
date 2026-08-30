@@ -24,7 +24,7 @@ class SchemaTests(unittest.TestCase):
                 "verify_points": [],
                 "answer": "stashed",
             },
-            ask_use_ledger=False,
+            ask_use_jspace=False,
         )
         self.assertTrue(any("extra keys" in g and "answer" in g for g in gaps))
 
@@ -37,7 +37,7 @@ class SchemaTests(unittest.TestCase):
                 "constraints": ["c"],
                 "verify_points": ["v"],
             },
-            ask_use_ledger=False,
+            ask_use_jspace=False,
         )
         self.assertEqual(gaps, [])
 

@@ -52,15 +52,15 @@ class PromptSkillTests(unittest.TestCase):
             verify_points=["v"],
         )
 
-    def test_fast_plan_omits_use_ledger(self) -> None:
-        text = prompts.plan_prompt("task", ask_use_ledger=False)
-        self.assertNotIn("use_ledger", text)
+    def test_fast_plan_omits_use_jspace(self) -> None:
+        text = prompts.plan_prompt("task", ask_use_jspace=False)
+        self.assertNotIn("use_jspace", text)
         self.assertIn("Skill ban (this phase)", text)
 
-    def test_high_plan_asks_use_ledger(self) -> None:
-        text = prompts.plan_prompt("task", ask_use_ledger=True)
-        self.assertIn('"use_ledger": true', text)
-        self.assertIn("Set use_ledger=false only when", text)
+    def test_ledger_plan_asks_use_jspace(self) -> None:
+        text = prompts.plan_prompt("task", ask_use_jspace=True)
+        self.assertIn('"use_jspace": true', text)
+        self.assertIn("Set use_jspace=false only when", text)
         self.assertIn("multi-path", text)
         self.assertIn("Skill ban (this phase)", text)
         self.assertNotIn("majority-vote", text)
@@ -68,8 +68,6 @@ class PromptSkillTests(unittest.TestCase):
 
     def test_non_act_phases_ban_skills(self) -> None:
         for text in (
-            prompts.meld_panel_prompt("t", "primary_analyst", "desc"),
-            prompts.meld_judge_prompt("t", "panels"),
             prompts.quadrants_prompt("t"),
             prompts.factors_prompt("t", "{}"),
             prompts.plan_prompt("t"),
@@ -82,15 +80,18 @@ class PromptSkillTests(unittest.TestCase):
         text = prompts.quadrants_prompt("task")
         self.assertIn("unknown_unknowns", text)
         self.assertIn("Do not pick a decisive move", text)
+        self.assertNotIn("meld Judge", text)
+        self.assertNotIn("Meld judge", text)
 
     def test_factors_pick_known_unknown(self) -> None:
         text = prompts.factors_prompt("task", '{"known_unknowns": ["x"]}')
         self.assertIn("decisive_move", text)
         self.assertIn("NOT an unknown unknown", text)
+        self.assertNotIn("Meld judge", text)
 
     def test_plan_priority_original_verify_brief(self) -> None:
         brief = (
-            '{"schema":"flame.brief.v1","judge":null,'
+            '{"schema":"flame.brief.v1",'
             '"quadrants":{"known_knowns":[],"known_unknowns":["x"],'
             '"unknown_knowns":[],"unknown_unknowns":[]},'
             '"success_factors":["s"],"failure_factors":["f"],'
@@ -100,7 +101,7 @@ class PromptSkillTests(unittest.TestCase):
             "user original",
             brief=brief,
             diagnosis="points_met=False; diagnosis: keep the original request",
-            ask_use_ledger=False,
+            ask_use_jspace=False,
         )
         self.assertLess(text.index("[1 original"), text.index("[2 verify"))
         self.assertLess(text.index("[2 verify"), text.index("[3 brief"))
@@ -144,16 +145,16 @@ class PromptSkillTests(unittest.TestCase):
         self.assertIn("timed out after 30s", text)
         self.assertIn("do not treat silence as infeasibility", text)
 
-    def test_act_jspace_mentions_effort_high(self) -> None:
+    def test_act_jspace_mentions_effort_ledger(self) -> None:
         text = prompts.act_prompt("task", self.plan, skill="j-space", jspace_dir="/tmp/j-space")
         self.assertIn("[Flame act skill: j-space]", text)
-        self.assertIn("Effort=high", text)
+        self.assertIn("Effort=ledger", text)
         self.assertIn("/tmp/j-space/SKILL.md", text)
         self.assertNotIn("[Flame act skill: fact-graph]", text)
         self.assertNotIn("Skill ban (this act)", text)
         self.assertNotIn("Skill ban (this phase)", text)
 
-    def test_act_factgraph_mentions_effort_max(self) -> None:
+    def test_act_factgraph_mentions_effort_graph(self) -> None:
         text = prompts.act_prompt(
             "task",
             self.plan,
@@ -162,12 +163,33 @@ class PromptSkillTests(unittest.TestCase):
             graph_run_dir=".fact-graph/runs/flame-act-c1",
         )
         self.assertIn("[Flame act skill: fact-graph]", text)
-        self.assertIn("Effort=max", text)
+        self.assertIn("Effort=graph", text)
         self.assertIn("FOREGROUND", text)
         self.assertIn("NOT Flame success", text)
         self.assertIn("run --run-dir .fact-graph/runs/flame-act-c1", text)
         self.assertNotIn(" init ", text)
         self.assertIn("Do **not** re-init", text)
+
+    def test_act_meld_prompts(self) -> None:
+        panel = prompts.act_meld_panel_prompt("t", self.plan, "primary_analyst", "desc")
+        self.assertIn("[Flame phase: act]", panel)
+        self.assertIn("[Flame meld role: primary_analyst]", panel)
+        self.assertIn("Do not write answer.md", panel)
+        self.assertIn("Skill ban (this act)", panel)
+        judge = prompts.act_meld_judge_prompt("t", "### primary_analyst\nhi")
+        self.assertIn('"winner"', judge)
+        self.assertIn("finalizer_guidance", judge)
+        self.assertNotIn("[Flame phase: meld]", judge)
+        fin = prompts.act_meld_finalizer_prompt(
+            "t",
+            self.plan,
+            role="primary_analyst",
+            panel_answer="draft",
+            judge_json='{"winner":"primary_analyst"}',
+        )
+        self.assertIn("[Flame meld role: finalizer]", fin)
+        self.assertIn("[Flame meld selected: primary_analyst]", fin)
+        self.assertIn("answer.md", fin)
 
     def test_graph_seed_roles(self) -> None:
         seed = prompts.build_graph_seed(

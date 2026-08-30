@@ -21,31 +21,40 @@ _NO_SKILLS = (
 )
 
 
-def meld_panel_prompt(task: str, role: str, role_desc: str) -> str:
-    return f"""[Flame phase: meld]
+def act_meld_panel_prompt(task: str, plan: Plan, role: str, role_desc: str) -> str:
+    constraints = "\n".join(f"- {c}" for c in plan.constraints) or "- (none)"
+    return f"""[Flame phase: act]
 [Flame meld role: {role}]
-You are one independent panel member in a local fusion pass. Other panels cannot see you.
+You are one independent panel member. Other panels cannot see you.
 Role: {role_desc}
-{_NO_SKILLS}
+Skill ban (this act): No Flame skill attached. Do not read or follow j-space, fact-graph, or other Cursor skills; do not create .jspace/ or .fact-graph/.
 
-User request:
+Original user request:
 {task}
 
-Rules:
-- Answer from the user request only. Do not read the repository. Do not edit files. Do not implement.
-- Do not discuss the fusion process. Do not claim consensus with other models.
-- Distinguish fact, inference, and what you cannot know.
+Approach:
+{plan.approach or "(none — do the original request)"}
+Constraints:
+{constraints}
 
-Return a direct analysis. Plain text is fine.
+Rules:
+- You may read the workspace. Do not edit files. Do not implement.
+- Do not write answer.md, act.json, plan.json, or verify.json.
+- Do not discuss the fusion process. Do not claim consensus with other panels.
+- Distinguish fact, inference, and what you cannot know.
+- Directly answer the user request.
+
+Return a complete analysis. Plain text is fine.
 """
 
 
-def meld_judge_prompt(task: str, panel_blob: str) -> str:
-    return f"""[Flame phase: meld]
+def act_meld_judge_prompt(task: str, panel_blob: str) -> str:
+    roles = ", ".join(role for role, _desc in MELD_ROLES)
+    return f"""[Flame phase: act]
 [Flame meld role: judge]
-You are the Judge. Compare independent panel answers. Do not write the final user-facing solution.
-Do not read the repository. Do not edit files.
-{_NO_SKILLS}
+You are the Judge. Compare independent panel answers. Do not write the user-facing answer.
+You may read the workspace. Do not edit files.
+Skill ban (this act): No Flame skill attached. Do not read or follow j-space, fact-graph, or other Cursor skills; do not create .jspace/ or .fact-graph/.
 
 User request:
 {task}
@@ -55,24 +64,68 @@ Panel answers:
 
 Write ONLY a JSON object:
 {{
+  "winner": "one of: {roles}",
   "consensus": [{{"point": "...", "models": ["primary_analyst"], "caveat": ""}}],
   "contradictions": [{{"topic": "...", "positions": [{{"models": ["..."], "point": "..."}}], "status": "unresolved"}}],
   "unique_insights": [{{"point": "...", "models": ["..."]}}],
   "blind_spots": [{{"point": "...", "importance": "high"}}],
-  "verification_needed": [{{"claim": "...", "required_evidence": "..."}}]
+  "verification_needed": [{{"claim": "...", "required_evidence": "..."}}],
+  "finalizer_guidance": {{
+    "must_include": ["..."],
+    "must_preserve_uncertainty": ["..."],
+    "must_not_overstate": ["..."]
+  }}
 }}
-Consensus is not external fact. Do not invent verification. Do not pick a decisive move. JSON only.
+winner must be a panel that actually answered. Consensus is not external fact. Do not invent verification. JSON only.
 """
 
 
-def quadrants_prompt(task: str, judge_json: str = "") -> str:
-    extra = ""
-    if judge_json:
-        extra = (
-            "\nA prior meld Judge JSON follows. Use it as hypotheses, not as facts. "
-            "Drop claims you cannot ground in the request or a read-only look at the repo.\n\n"
-            f"{judge_json}\n"
-        )
+def act_meld_finalizer_prompt(
+    task: str,
+    plan: Plan,
+    *,
+    role: str,
+    panel_answer: str,
+    judge_json: str,
+) -> str:
+    constraints = "\n".join(f"- {c}" for c in plan.constraints) or "- (none)"
+    judge_block = judge_json.strip() or "(no Judge JSON — write from your panel draft)"
+    return f"""[Flame phase: act]
+[Flame meld role: finalizer]
+[Flame meld selected: {role}]
+You were the {role} panel. The Judge selected you to write the user-facing answer.
+Skill ban (this act): No Flame skill attached. Do not read or follow j-space, fact-graph, or other Cursor skills; do not create .jspace/ or .fact-graph/.
+
+Original user request (= plan.goal, harness-forced):
+{task}
+
+Approach:
+{plan.approach or "(none — do the original request)"}
+Constraints:
+{constraints}
+
+Your panel draft:
+{panel_answer}
+
+Judge JSON:
+{judge_block}
+
+Write or replace `answer.md` (workspace root or `.flame/answer.md`) this round.
+The UI displays that file and nothing else as the answer.
+Do not create or modify `.flame/plan.json` or `.flame/verify.json`.
+Follow finalizer_guidance when present: include must_include, keep must_preserve_uncertainty, do not overstate must_not_overstate.
+Do not recap panel-by-panel. Do not stitch. Unresolved contradictions stay visible. Consensus is not proven fact.
+
+Before you finish, write `.flame/act.json` (create `.flame/` if needed):
+{{
+  "summary": "1–2 plain sentences for the user: what you delivered this cycle (no JSON, no path lists, ≤120 chars)",
+  "deliverables": ["workspace-relative files the user should read, e.g. answer.md"]
+}}
+Keep doing the work in the repo; act.json is only the user-facing recap.
+"""
+
+
+def quadrants_prompt(task: str) -> str:
     return f"""[Flame phase: quadrants]
 You fill Rumsfeld's four quadrants for this request. You are not the planner and not the executor.
 Do not implement. Do not pick search. Do not pick a decisive move. Do not write success/failure factors.
@@ -80,7 +133,7 @@ Do not implement. Do not pick search. Do not pick a decisive move. Do not write 
 
 User request:
 {task}
-{extra}
+
 Read-only reconnaissance is allowed only to discover what belongs in the quadrants
 (workspace / request artifacts only — not skills).
 
@@ -95,11 +148,8 @@ Keep each list short (at most 5). Empty list is valid. JSON only.
 """
 
 
-def factors_prompt(task: str, quadrants_json: str, judge_json: str = "") -> str:
-    extra = ""
-    if judge_json:
-        extra += f"\nMeld judge JSON (hypotheses, not facts):\n{judge_json}\n"
-    extra += f"\nQuadrants (already filled; do not redo them):\n{quadrants_json}\n"
+def factors_prompt(task: str, quadrants_json: str) -> str:
+    extra = f"\nQuadrants (already filled; do not redo them):\n{quadrants_json}\n"
     return f"""[Flame phase: factors]
 The quadrants are done. Now pick what the planner should care about this run.
 Do not implement. Do not pick search. Do not rewrite the user request.
@@ -126,7 +176,7 @@ def plan_prompt(
     brief: str = "",
     diagnosis: str = "",
     *,
-    ask_use_ledger: bool = False,
+    ask_use_jspace: bool = False,
 ) -> str:
     job = original_task.strip()
     extra = f"\n[1 original — the job]\n{job}\n"
@@ -149,16 +199,16 @@ def plan_prompt(
             else "Use only where original is silent. Fields below are labeled; do not invent a new job."
         )
         extra += f"\n[3 brief — hypotheses, lowest]\n{stale}\n{brief_body}\n"
-    ledger_schema = ""
-    ledger_rules = ""
-    if ask_use_ledger:
-        ledger_schema = ',\n  "use_ledger": true\n'
-        ledger_rules = """
-Also set use_ledger (required on this effort). Default true.
-Harness will mount the j-space ledger skill on act when true.
-Set use_ledger=false only when:
+    jspace_schema = ""
+    jspace_rules = ""
+    if ask_use_jspace:
+        jspace_schema = ',\n  "use_jspace": true\n'
+        jspace_rules = """
+Also set use_jspace (required on this effort). Default true.
+Harness will mount the j-space skill on act when true.
+Set use_jspace=false only when:
 - this cycle's approach is short (few seams, one-shot checkable), or
-- the approach is clearly complex / multi-path (do not dig a ledger into unresolved branching).
+- the approach is clearly complex / multi-path (do not dig a j-space ledger into unresolved branching).
 Omit or unclear → true. Do not open skills now.
 """
     unknown_rule = (
@@ -175,11 +225,11 @@ When inputs conflict, this order is strict:
 2. verify — if present, wins on facts about the last attempt and on what this cycle changes.
 3. brief — optional, pre-act guesses. Fills gaps only. A missing brief is fine.
 {unknown_rule}
-Act contract: goal, approach, constraints{', and use_ledger' if ask_use_ledger else ''}.
+Act contract: goal, approach, constraints{', and use_jspace' if ask_use_jspace else ''}.
 Goal MUST be the original user request verbatim (copy field [1]). The harness overwrites goal to original after you write — do not invent a proxy success sentence.
 Approach is how to attack this cycle, not a second job.
 Verify contract: verify_points (min-fail checks of the user-visible work, typically answer.md). Do not put plan.json, act.json, JSON key order, or file mtimes in verify_points — the harness owns those.
-{ledger_rules}
+{jspace_rules}
 {extra}
 Write ONLY `.flame/plan.json` (create `.flame/` if needed). Do not change any other files.
 JSON schema (no extra keys):
@@ -188,7 +238,7 @@ JSON schema (no extra keys):
   "approach": "how to get there this cycle; first sentence is the load that if wrong fails the task",
   "summary": "1–2 plain sentences for the user: this cycle's plan in everyday language (no JSON, ≤120 chars)",
   "constraints": ["must / must not, from original and brief"],
-  "verify_points": ["concrete min-fail checks of the deliverable, ideally runnable"]{ledger_schema}}}
+  "verify_points": ["concrete min-fail checks of the deliverable, ideally runnable"]{jspace_schema}}}
 You may also print the same JSON. Do not use a separate planning UI instead of this file.
 """
 
@@ -308,7 +358,7 @@ def _jspace_act_addendum(jspace_dir: str) -> str:
     path = jspace_dir or "(j-space skill not found on disk; use the host j-space skill if loaded)"
     return f"""
 [Flame act skill: j-space]
-Effort=high and plan.use_ledger=true. Before implementing, read `{path}/SKILL.md` and follow it.
+Effort=ledger and plan.use_jspace=true. Before implementing, read `{path}/SKILL.md` and follow it.
 This is a `loop` pass: keep a `.jspace/` ledger in this workspace if the controller is available
 (`python3 {path}/scripts/jspace.py` when that file exists).
 Hold the goal through the mechanical work. Do not stop at notes — deliver the plan.
@@ -325,7 +375,7 @@ def _factgraph_act_addendum(
     orch = f"{path}/scripts/orchestrator.py" if factgraph_dir else "orchestrator.py"
     return f"""
 [Flame act skill: fact-graph]
-Effort=max: open the fact-graph. Follow `{path}/SKILL.md`. You are the control session.
+Effort=graph: open the fact-graph. Follow `{path}/SKILL.md`. You are the control session.
 Flame harness already inited the board from `.flame/graph_seed.json` at `{graph_run_dir}`
 (origin=现状, goal=original+verify_points, constraints=plan.constraints, hint=approach).
 Do **not** re-init or change origin/goal/constraints.

@@ -28,7 +28,7 @@ def _load_orch():
     return mod
 
 
-class FactgraphLedgerTests(unittest.TestCase):
+class FactgraphOrchestratorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.orch = _load_orch()
@@ -36,21 +36,14 @@ class FactgraphLedgerTests(unittest.TestCase):
     def _board(self) -> dict:
         return self.orch.new_board("t", "origin text", "goal text", False, constraints="")
 
-    def test_add_intent_forces_off_when_open_exists(self) -> None:
+    def test_add_intent_has_no_ledger_field(self) -> None:
         board = self._board()
-        first = self.orch.add_intent(board, ["origin"], "a", "reasoner", use_ledger=True)
-        self.assertTrue(first["use_ledger"])
-        second = self.orch.add_intent(board, ["origin"], "b", "reasoner", use_ledger=True)
-        self.assertFalse(second["use_ledger"])
+        first = self.orch.add_intent(board, ["origin"], "a", "reasoner")
+        self.assertNotIn("use_ledger", first)
+        second = self.orch.add_intent(board, ["origin"], "b", "reasoner")
+        self.assertNotIn("use_ledger", second)
 
-    def test_intent_allows_ledger_only_sole_open(self) -> None:
-        board = self._board()
-        a = self.orch.add_intent(board, ["origin"], "a", "reasoner", use_ledger=True)
-        self.assertTrue(self.orch.intent_allows_ledger(board, a))
-        self.orch.add_intent(board, ["origin"], "b", "reasoner", use_ledger=False)
-        self.assertFalse(self.orch.intent_allows_ledger(board, a))
-
-    def test_valid_reason_parses_use_ledger(self) -> None:
+    def test_valid_reason_intent_is_three_tuple(self) -> None:
         PhaseResult = self.orch.PhaseResult
         result = PhaseResult(
             exit_code=0,
@@ -72,13 +65,7 @@ class FactgraphLedgerTests(unittest.TestCase):
         )
         outcome = self.orch.valid_reason(result, {"origin"})
         self.assertEqual(outcome[0], "intent")
-        self.assertTrue(outcome[3])
-
-    def test_ledger_root_isolated(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            run_dir = Path(raw)
-            root = self.orch.ledger_root_for(run_dir, "i001")
-            self.assertEqual(root, (run_dir / "ledgers" / "i001").resolve())
+        self.assertEqual(len(outcome), 3)
 
     def test_init_from_seed_multiline(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from flame.types import Effort
+from flame.types import Effort, EFFORT_ALIASES
 from flame.budget import SAFETY_MAX_CYCLES
 
 
@@ -78,10 +78,7 @@ class Config:
     ) -> Config:
         ws = Path(workspace or _env("FLAME_WORKSPACE", os.getcwd())).resolve()
         effort_name = (effort or _env("FLAME_EFFORT", "standard")).lower()
-        if effort_name == "low":
-            effort_name = "fast"
-        elif effort_name == "medium":
-            effort_name = "standard"
+        effort_name = EFFORT_ALIASES.get(effort_name, effort_name)
         try:
             effort_val = Effort(effort_name)
         except ValueError as exc:

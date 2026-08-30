@@ -8,13 +8,19 @@ from pathlib import Path
 class Effort(StrEnum):
     fast = "fast"
     standard = "standard"
-    high = "high"
-    max = "max"
+    ledger = "ledger"
+    meld = "meld"
+    graph = "graph"
+
+
+EFFORT_ALIASES = {
+    "low": "fast",
+    "medium": "standard",
+}
 
 
 class Phase(StrEnum):
     preprocess = "preprocess"
-    meld = "meld"
     quadrants = "quadrants"
     factors = "factors"
     plan = "plan"
@@ -36,7 +42,6 @@ QUADRANT_KEYS = (
 class Brief:
     """Preprocess briefing. Python assembles this; agents fill pieces."""
 
-    judge: dict | None = None
     quadrants: dict[str, list[str]] = field(default_factory=dict)
     success_factors: list[str] = field(default_factory=list)
     failure_factors: list[str] = field(default_factory=list)
@@ -46,8 +51,7 @@ class Brief:
     def empty(self) -> bool:
         has_q = any(self.quadrants.get(k) for k in QUADRANT_KEYS)
         return (
-            self.judge is None
-            and not has_q
+            not has_q
             and not self.success_factors
             and not self.failure_factors
             and not self.decisive_move
@@ -56,7 +60,6 @@ class Brief:
     def to_dict(self) -> dict:
         return {
             "schema": BRIEF_SCHEMA,
-            "judge": self.judge,
             "quadrants": {key: list(self.quadrants.get(key) or []) for key in QUADRANT_KEYS},
             "success_factors": self.success_factors[:3],
             "failure_factors": self.failure_factors[:3],
@@ -67,9 +70,7 @@ class Brief:
     @classmethod
     def from_dict(cls, payload: dict) -> Brief:
         quadrants = payload.get("quadrants") if isinstance(payload.get("quadrants"), dict) else {}
-        judge = payload.get("judge")
         return cls(
-            judge=judge if isinstance(judge, dict) else None,
             quadrants={key: _brief_str_list(quadrants.get(key), 5) for key in QUADRANT_KEYS},
             success_factors=_brief_str_list(payload.get("success_factors"), 3),
             failure_factors=_brief_str_list(payload.get("failure_factors"), 3),
@@ -97,24 +98,6 @@ class Brief:
                     continue
                 lines.append(f"  {key}:")
                 lines.extend(f"  - {item}" for item in items)
-        if self.judge:
-            lines.append("meld_judge (hypotheses, not facts):")
-            for key in (
-                "consensus",
-                "contradictions",
-                "unique_insights",
-                "blind_spots",
-                "verification_needed",
-            ):
-                value = self.judge.get(key)
-                if not value:
-                    continue
-                lines.append(f"  {key}:")
-                if isinstance(value, list):
-                    for item in value[:5]:
-                        lines.append(f"  - {item}")
-                else:
-                    lines.append(f"  - {value}")
         return "\n".join(lines) if lines else ""
 
 
@@ -130,7 +113,7 @@ class Plan:
     approach: str
     constraints: list[str]
     verify_points: list[str]
-    use_ledger: bool | None = None  # high only: mount j-space; default True when asked
+    use_jspace: bool | None = None  # ledger effort only: mount j-space; default True when asked
     degraded: bool = False
     summary: str = ""
     schema_gaps: list[str] = field(default_factory=list)

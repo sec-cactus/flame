@@ -4,9 +4,9 @@
 
 | effort | act skill | 是否打进 Flame 包 |
 |---|---|---|
-| fast / standard | 无 | — |
-| **high** | j-space（plan.`use_ledger`，默认 true；短任务或明显多路径可 false） | **否，需本机安装** |
-| **max** | fact-graph（固定） | 是（`flame/data/fact-graph`） |
+| fast / standard / meld | 无 | — |
+| **ledger** | j-space（plan.`use_jspace`，默认 true；短任务或明显多路径可 false） | **否，需本机安装** |
+| **graph** | fact-graph（固定；执行阶段不挂账本） | 是（`flame/data/fact-graph`） |
 
 fact-graph 的 `complete` 不是 Flame 通过；verify 仍是终裁。图探索 / Flame 质检。
 
@@ -20,7 +20,7 @@ flame skills
 
 `j-space` 一行若是 `MISSING`，按下面安装；不要指望 `pip install -e .` 带上它。
 
-## j-space（必装，若要用 high 默认账本）
+## j-space（必装，若要用 ledger 默认账本）
 
 来源：[J-Space Cognition Suite V3.6](https://github.com/Tiger3807861189/J-Space-Cognition-Suite-V3.6)。Apache-2.0。入口是仓库里的 **`j-space/` 整目录**（`SKILL.md`、`modules/`、`references/`、`scripts/` 必须相对完整，不要只拷 `SKILL.md`）。
 
@@ -52,16 +52,16 @@ python3 ~/.cursor/skills-cursor/j-space/scripts/verify_suite.py
 flame skills
 ```
 
-跑一条 high 任务后，看工作区 `.flame/act_skill.json` 的 `jspace` / `use_ledger` 字段。stderr 会有 `skill=j-space`（默认挂账本时）。
+跑一条 ledger 任务后，看工作区 `.flame/act_skill.json` 的 `jspace` / `use_jspace` 字段。stderr 会有 `skill=j-space`（默认挂账本时）。
 
-装不上或路径不对时：high + `use_ledger=true` 的 act 仍会跑，但 prompt 里是「skill not found」——没有 ledger、没有模块。
+装不上或路径不对时：ledger + `use_jspace=true` 的 act 仍会跑，但 prompt 里是「skill not found」——没有 ledger、没有模块。
 
-## fact-graph（max，已打包）
+## fact-graph（graph，已打包）
 
 包内 `flame/data/fact-graph/`。可用 `FLAME_FACTGRAPH` 覆盖。
 
-max 时 act **前台**跑编排器并等到退出；`FLAME_TIMEOUT_SEC`（默认 1800）要盖得住 fact-graph 的 `wallclock_budget`。
+graph 时 act **前台**跑编排器并等到退出；`FLAME_TIMEOUT_SEC`（默认 1800）要盖得住 fact-graph 的 `wallclock_budget`。
 
 开图前 harness 写 `.flame/graph_seed.json` 并直接 `init` 到 `.fact-graph/runs/flame-act-cN/`（act 只 `run`，不得改 origin/goal）。字段：`goal`=original+verify_points，`constraints`=plan.constraints，`origin`=brief/上轮 verify（现状），`hint`=approach。`plan.goal` 在所有 effort 上都被强制为 original。
 
-reason 可为唯一长枝 intent 设 `use_ledger=true`（默认 false）。编排器仅在 open intent 恰为 1 时给 explore 挂隔离账本目录 `run_dir/ledgers/<intent_id>/`（需本机 j-space；缺失则跳过账本仍探索）。
+执行阶段不挂 j-space 账本。

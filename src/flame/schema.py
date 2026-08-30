@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 PLAN_KEYS = frozenset(
-    {"goal", "approach", "summary", "constraints", "verify_points", "use_ledger", "degraded"}
+    {"goal", "approach", "summary", "constraints", "verify_points", "use_jspace", "degraded"}
 )
 ACT_KEYS = frozenset({"summary", "deliverables"})
 VERIFY_KEYS = frozenset(
@@ -27,7 +27,6 @@ VERIFY_KEYS = frozenset(
 BRIEF_KEYS = frozenset(
     {
         "schema",
-        "judge",
         "quadrants",
         "success_factors",
         "failure_factors",
@@ -42,6 +41,8 @@ MELD_JUDGE_KEYS = frozenset(
         "unique_insights",
         "blind_spots",
         "verification_needed",
+        "winner",
+        "finalizer_guidance",
     }
 )
 QUADRANT_KEYS = frozenset(
@@ -89,7 +90,7 @@ def _need_bool(payload: dict[str, Any], key: str, *, required: bool = False) -> 
     return []
 
 
-def validate_plan_payload(payload: Any, *, ask_use_ledger: bool) -> list[str]:
+def validate_plan_payload(payload: Any, *, ask_use_jspace: bool) -> list[str]:
     gaps = _need_object(payload, "plan.json")
     if gaps:
         return gaps
@@ -102,10 +103,10 @@ def validate_plan_payload(payload: Any, *, ask_use_ledger: bool) -> list[str]:
     gaps.extend(_need_str(payload, "summary"))
     gaps.extend(_need_str_list(payload, "constraints"))
     gaps.extend(_need_str_list(payload, "verify_points"))
-    if ask_use_ledger:
-        gaps.extend(_need_bool(payload, "use_ledger"))
-    elif "use_ledger" in payload:
-        gaps.extend(_need_bool(payload, "use_ledger"))
+    if ask_use_jspace:
+        gaps.extend(_need_bool(payload, "use_jspace"))
+    elif "use_jspace" in payload:
+        gaps.extend(_need_bool(payload, "use_jspace"))
     return gaps
 
 

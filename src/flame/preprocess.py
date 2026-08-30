@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flame import budget, prompts, schema
+from flame import budget, prompts
 from flame.agent_backends import AgentBackend
-from flame.backend import create_agent_backend, extract_json
+from flame.backend import extract_json
 from flame.log import SessionLog
 from flame.progress import Progress
 from flame.types import Brief, Effort, Phase, QUADRANT_KEYS
@@ -33,7 +33,7 @@ def run_preprocess(
     progress.phase("preprocess")
     log.emit("phase", phase="preprocess")
     try:
-        return _build_brief(backend, log, progress, original_task, flame_dir, effort)
+        return _build_brief(backend, log, progress, original_task, flame_dir)
     except Exception as err:  # noqa: BLE001 — preprocess must not block plan
         progress.fail(f"preprocess failed, using original: {err}")
         log.emit("preprocess_degraded", error=str(err))
@@ -46,17 +46,11 @@ def _build_brief(
     progress: Progress,
     task: str,
     flame_dir: Path,
-    effort: Effort,
 ) -> PreprocessResult:
     brief = Brief()
-    judge_text = ""
-    if budget.use_meld(effort):
-        judge_text, judge_obj = _meld(backend, log, progress, task, flame_dir)
-        brief.judge = judge_obj
-
-    brief.quadrants = _quadrants(backend, log, progress, task, judge_text)
+    brief.quadrants = _quadrants(backend, log, progress, task)
     success, failure, move, summary = _factors(
-        backend, log, progress, task, brief.quadrants, judge_text
+        backend, log, progress, task, brief.quadrants
     )
     brief.success_factors = success
     brief.failure_factors = failure
@@ -73,65 +67,15 @@ def _build_brief(
     return PreprocessResult(brief=text)
 
 
-def _meld(
-    backend: AgentBackend,
-    log: SessionLog,
-    progress: Progress,
-    task: str,
-    flame_dir: Path,
-) -> tuple[str, dict[str, Any] | None]:
-    progress.note("meld panels")
-    jobs = [
-        {
-            "prompt": prompts.meld_panel_prompt(task, role, desc),
-            "phase": Phase.meld,
-            "force": False,
-            "mode": "ask",
-        }
-        for role, desc in prompts.MELD_ROLES
-    ]
-    panels = backend.run_parallel(jobs)
-    blobs: list[str] = []
-    for (role, _desc), panel in zip(prompts.MELD_ROLES, panels, strict=True):
-        log.emit("agent_done", phase="meld", role=role, error=panel.is_error, code=panel.returncode)
-        if panel.is_error or not panel.text.strip():
-            continue
-        blobs.append(f"### {role}\n{panel.text.strip()}")
-    if len(blobs) < 2:
-        progress.fail("meld: fewer than 2 panels, skip judge")
-        log.emit("meld_skipped", reason="not_enough_panels", n=len(blobs))
-        return "", None
-    progress.note("meld judge")
-    judge = backend.run(
-        prompts.meld_judge_prompt(task, "\n\n".join(blobs)),
-        phase=Phase.meld,
-        force=False,
-        mode="ask",
-    )
-    log.emit("agent_done", phase="meld_judge", error=judge.is_error, code=judge.returncode)
-    payload = extract_json(judge.text) if not judge.is_error else None
-    if payload is None:
-        progress.fail("meld judge JSON missing; quadrants continue without it")
-        return "", None
-    if not isinstance(payload, dict):
-        progress.fail("meld judge JSON missing; quadrants continue without it")
-        return "", None
-    payload = schema.strip_to_allowed(payload, schema.MELD_JUDGE_KEYS)
-    text = json.dumps(payload, ensure_ascii=False, indent=2)
-    (flame_dir / "meld-judge.json").write_text(text + "\n", encoding="utf-8")
-    return text, payload
-
-
 def _quadrants(
     backend: AgentBackend,
     log: SessionLog,
     progress: Progress,
     task: str,
-    judge_json: str,
 ) -> dict[str, list[str]]:
     progress.note("quadrants")
     result = backend.run(
-        prompts.quadrants_prompt(task, judge_json),
+        prompts.quadrants_prompt(task),
         phase=Phase.quadrants,
         force=False,
         mode="ask",
@@ -154,12 +98,11 @@ def _factors(
     progress: Progress,
     task: str,
     quadrants: dict[str, list[str]],
-    judge_json: str,
 ) -> tuple[list[str], list[str], str, str]:
     progress.note("factors")
     qtext = json.dumps(quadrants, ensure_ascii=False, indent=2)
     result = backend.run(
-        prompts.factors_prompt(task, qtext, judge_json),
+        prompts.factors_prompt(task, qtext),
         phase=Phase.factors,
         force=False,
         mode="ask",

@@ -16,7 +16,7 @@ from flame.config import Config
 from flame.log import SessionLog
 from flame.progress import Progress
 from flame.safety import SafetyDenied, deny_reason
-from flame.types import Effort, Phase, Plan, RunResult, VerifyResult
+from flame.types import AgentResult, Effort, Phase, Plan, RunResult, VerifyResult
 
 
 class FlameError(RuntimeError):
@@ -71,24 +71,24 @@ def continue_run(
     progress: Progress | None = None,
     config: Config | None = None,
 ) -> RunResult:
-    """Resume max fact-graph from `.flame/graph_run.json`: hint + orchestrator run + verify."""
+    """Resume graph fact-graph from `.flame/graph_run.json`: hint + orchestrator run + verify."""
     cfg = config or Config.load(
         workspace=workspace,
-        effort="max",
+        effort="graph",
         model=model,
         agent_backend=agent_backend,
         agent_bin=agent_bin,
         force=force,
     )
-    if cfg.effort is not Effort.max:
-        raise FlameError("continue requires effort=max")
+    if cfg.effort is not Effort.graph:
+        raise FlameError("continue requires effort=graph")
     progress = progress or Progress()
     flame_dir = cfg.workspace / ".flame"
     flame_dir.mkdir(parents=True, exist_ok=True)
     _archive_stage_markers(flame_dir, keep=("brief.json", "plan.json", "graph_run.json"))
     session_id = uuid.uuid4().hex[:12]
     log = SessionLog(cfg.log_dir / f"{session_id}.jsonl")
-    log.emit("start", task=task, effort="max", model=cfg.model, mode="continue")
+    log.emit("start", task=task, effort="graph", model=cfg.model, mode="continue")
     backend = create_agent_backend(cfg, progress)
 
     original_task = task.strip()
@@ -99,13 +99,13 @@ def continue_run(
     graph_run = _read_json_file(flame_dir / "graph_run.json")
     run_rel = str((graph_run or {}).get("run_dir") or "").strip()
     if not run_rel:
-        raise FlameError("continue requires .flame/graph_run.json from a prior max run")
+        raise FlameError("continue requires .flame/graph_run.json from a prior graph run")
 
     plan_payload = _read_json_file(flame_dir / "plan.json")
     if plan_payload:
-        plan = _plan_from(plan_payload, ask_use_ledger=False)
+        plan = _plan_from(plan_payload, ask_use_jspace=False)
     else:
-        plan = _stub_plan(original_task, ask_use_ledger=False)
+        plan = _stub_plan(original_task, ask_use_jspace=False)
     plan.goal = original_task
     _write_plan(flame_dir / "plan.json", plan)
     plan_mtime = (flame_dir / "plan.json").stat().st_mtime
@@ -271,17 +271,17 @@ def run(
             diagnosis,
             flame_dir,
             original_task,
-            ask_use_ledger=budget.ask_use_ledger(cfg.effort),
+            ask_use_jspace=budget.ask_use_jspace(cfg.effort),
         )
         plan.goal = original_task.strip()
         if not plan.summary.strip():
             plan.summary = stage_summary.plan_summary(
                 {"summary": plan.summary, "approach": plan.approach}
             )
-        if budget.ask_use_ledger(cfg.effort) and plan.use_ledger is None:
-            plan.use_ledger = True
-        elif not budget.ask_use_ledger(cfg.effort):
-            plan.use_ledger = None
+        if budget.ask_use_jspace(cfg.effort) and plan.use_jspace is None:
+            plan.use_jspace = True
+        elif not budget.ask_use_jspace(cfg.effort):
+            plan.use_jspace = None
         _write_plan(flame_dir / "plan.json", plan)
         plan_mtime = (flame_dir / "plan.json").stat().st_mtime
         if round_plan_mtime is None:
@@ -292,8 +292,10 @@ def run(
             progress.fail("plan degraded; act will run on the original request")
         if skill:
             progress.note(f"skill={skill}")
-        elif cfg.effort is Effort.high and plan.use_ledger is False:
-            progress.note("use_ledger=false; act without j-space")
+        elif cfg.effort is Effort.meld:
+            progress.note("act=meld (panels → judge → selected panel writes)")
+        elif cfg.effort is Effort.ledger and plan.use_jspace is False:
+            progress.note("use_jspace=false; act without j-space")
 
         log.emit("phase", phase="act", cycle=cycle)
         progress.phase("act", cap)
@@ -335,7 +337,7 @@ def run(
                 {
                     "effort": cfg.effort.value,
                     "skill": skill,
-                    "use_ledger": plan.use_ledger,
+                    "use_jspace": plan.use_jspace,
                     "jspace": str(jspace) if jspace else None,
                     "factgraph": str(factgraph) if factgraph else None,
                     "graph_seed": str(graph_seed_path.name) if skill == "fact-graph" else None,
@@ -350,34 +352,51 @@ def run(
         verify_before = _read_bytes(flame_dir / "verify.json")
         cycle_trace = evidence.ToolTrace()
         act_trace = evidence.ToolTrace()
-        act = backend.run(
-            prompts.act_prompt(
+
+        def _on_act_event(event: dict[str, Any]) -> None:
+            evidence.collect_tool_event(event, act_trace)
+
+        if budget.use_act_meld(cfg.effort):
+            act, act_note = _run_meld_act(
+                backend,
+                log,
+                progress,
                 original_task,
                 plan,
-                skill=skill,
-                jspace_dir=str(jspace) if jspace else "",
-                factgraph_dir=str(factgraph) if factgraph else "",
-                graph_run_dir=graph_run_rel,
-            ),
-            phase=Phase.act,
-            force=True,
-            mode=None,
-            on_event=lambda event: evidence.collect_tool_event(event, act_trace),
-        )
+                flame_dir,
+                workspace=cfg.workspace,
+                on_event=_on_act_event,
+            )
+        else:
+            act = backend.run(
+                prompts.act_prompt(
+                    original_task,
+                    plan,
+                    skill=skill,
+                    jspace_dir=str(jspace) if jspace else "",
+                    factgraph_dir=str(factgraph) if factgraph else "",
+                    graph_run_dir=graph_run_rel,
+                ),
+                phase=Phase.act,
+                force=True,
+                mode=None,
+                on_event=_on_act_event,
+            )
+            act_note = ""
         cycle_trace.absorb(act_trace)
         log.emit("agent_done", phase="act", error=act.is_error, code=act.returncode)
-        act_note = ""
         if act.is_error and not act.timed_out:
             msg = act.text.strip() or f"act agent failed (exit {act.returncode})"
             progress.fail(msg)
             raise FlameError(msg)
         if act.timed_out:
-            act_note = (
-                f"Act timed out after {cfg.timeout_sec}s (Flame watchdog). "
-                "Judge workspace artifacts (.jspace/, .fact-graph/, deliverables); "
-                "an incomplete agent reply is not proof the job is impossible. "
-                "Prefer retry=true if more cycles could finish from this state."
-            )
+            if not act_note:
+                act_note = (
+                    f"Act timed out after {cfg.timeout_sec}s (Flame watchdog). "
+                    "Judge workspace artifacts (.jspace/, .fact-graph/, deliverables); "
+                    "an incomplete agent reply is not proof the job is impossible. "
+                    "Prefer retry=true if more cycles could finish from this state."
+                )
             progress.fail(f"act timed out after {cfg.timeout_sec}s; handing partial work to verify")
             (flame_dir / "act_status.json").write_text(
                 json.dumps(
@@ -494,9 +513,115 @@ def run(
 def _act_skill(effort: Effort, plan: Plan) -> str | None:
     if budget.use_factgraph(effort):
         return "fact-graph"
-    if budget.use_jspace(effort, plan.use_ledger):
+    if budget.use_jspace(effort, plan.use_jspace):
         return "j-space"
     return None
+
+
+def _run_meld_act(
+    backend: AgentBackend,
+    log: SessionLog,
+    progress: Progress,
+    original_task: str,
+    plan: Plan,
+    flame_dir: Path,
+    *,
+    workspace: Path,
+    on_event: Any,
+) -> tuple[AgentResult, str]:
+    """Act-stage fusion: panels → judge picks winner → that panel writes answer.md."""
+    progress.note("meld panels")
+    jobs = [
+        {
+            "prompt": prompts.act_meld_panel_prompt(original_task, plan, role, desc),
+            "phase": Phase.act,
+            "force": False,
+            "mode": "ask",
+            "on_event": on_event,
+        }
+        for role, desc in prompts.MELD_ROLES
+    ]
+    panels = backend.run_parallel(jobs)
+    ok: list[tuple[str, str]] = []
+    for (role, _desc), panel in zip(prompts.MELD_ROLES, panels, strict=True):
+        log.emit(
+            "agent_done",
+            phase="act",
+            role=role,
+            error=panel.is_error,
+            code=panel.returncode,
+            timed_out=panel.timed_out,
+        )
+        if panel.is_error or panel.timed_out or not panel.text.strip():
+            continue
+        ok.append((role, panel.text.strip()))
+    if not ok:
+        raise FlameError("act meld: no panel produced an answer")
+
+    winner = ""
+    judge_json = ""
+    if len(ok) >= 2:
+        progress.note("meld judge")
+        blob = "\n\n".join(f"### {role}\n{text}" for role, text in ok)
+        judge = backend.run(
+            prompts.act_meld_judge_prompt(original_task, blob),
+            phase=Phase.act,
+            force=False,
+            mode="ask",
+            on_event=on_event,
+        )
+        log.emit(
+            "agent_done",
+            phase="act",
+            role="judge",
+            error=judge.is_error,
+            code=judge.returncode,
+        )
+        payload = extract_json(judge.text) if not judge.is_error and not judge.timed_out else None
+        if isinstance(payload, dict):
+            payload = schema.strip_to_allowed(payload, schema.MELD_JUDGE_KEYS)
+            pick = str(payload.get("winner") or "").strip()
+            allowed = {role for role, _text in ok}
+            if pick in allowed:
+                winner = pick
+                judge_json = json.dumps(payload, ensure_ascii=False, indent=2)
+                (flame_dir / "meld-judge.json").write_text(judge_json + "\n", encoding="utf-8")
+        if not winner:
+            progress.fail("meld judge missing winner; selected panel writes from draft")
+    if not winner:
+        names = {role for role, _text in ok}
+        winner = "primary_analyst" if "primary_analyst" in names else ok[0][0]
+    draft = next(text for role, text in ok if role == winner)
+
+    progress.note(f"meld finalizer ({winner})")
+    final = backend.run(
+        prompts.act_meld_finalizer_prompt(
+            original_task,
+            plan,
+            role=winner,
+            panel_answer=draft,
+            judge_json=judge_json,
+        ),
+        phase=Phase.act,
+        force=True,
+        mode=None,
+        on_event=on_event,
+    )
+    log.emit(
+        "agent_done",
+        phase="act",
+        role="finalizer",
+        error=final.is_error,
+        code=final.returncode,
+        timed_out=final.timed_out,
+    )
+    if final.is_error and not final.timed_out:
+        progress.fail("meld finalizer failed; using selected panel draft")
+        _write_answer_md(workspace, draft)
+        return AgentResult(text=draft, is_error=False, returncode=0), ""
+    if final.timed_out and not schema.answer_md_path(workspace):
+        _write_answer_md(workspace, draft)
+    return final, ""
 
 
 def _init_factgraph_board(
@@ -658,14 +783,14 @@ def _run_plan(
     flame_dir: Path,
     original_task: str,
     *,
-    ask_use_ledger: bool,
+    ask_use_jspace: bool,
 ) -> Plan:
     result = backend.run(
         prompts.plan_prompt(
             original_task,
             brief=brief,
             diagnosis=diagnosis,
-            ask_use_ledger=ask_use_ledger,
+            ask_use_jspace=ask_use_jspace,
         ),
         phase=Phase.plan,
         force=True,
@@ -676,10 +801,10 @@ def _run_plan(
     if payload is None:
         (flame_dir / "plan.raw.txt").write_text(result.text or result.stderr, encoding="utf-8")
         log.emit("plan_degraded", reason="no_json")
-        return _stub_plan(original_task, ask_use_ledger=ask_use_ledger)
-    plan = _plan_from(payload, ask_use_ledger=ask_use_ledger)
+        return _stub_plan(original_task, ask_use_jspace=ask_use_jspace)
+    plan = _plan_from(payload, ask_use_jspace=ask_use_jspace)
     plan.schema_gaps = schema.validate_plan_payload(
-        payload, ask_use_ledger=ask_use_ledger
+        payload, ask_use_jspace=ask_use_jspace
     )
     if not plan.summary.strip():
         plan.summary = stage_summary.plan_summary(payload if isinstance(payload, dict) else None)
@@ -696,8 +821,8 @@ def _plan_payload(plan: Plan) -> dict[str, Any]:
         "constraints": plan.constraints,
         "verify_points": plan.verify_points,
     }
-    if plan.use_ledger is not None:
-        dumped["use_ledger"] = plan.use_ledger
+    if plan.use_jspace is not None:
+        dumped["use_jspace"] = plan.use_jspace
     if plan.degraded:
         dumped["degraded"] = True
     return dumped
@@ -1004,18 +1129,18 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _stub_plan(original: str, *, ask_use_ledger: bool) -> Plan:
+def _stub_plan(original: str, *, ask_use_jspace: bool) -> Plan:
     return Plan(
         goal=original.strip(),
         approach="Carry out the original user request.",
         constraints=[],
         verify_points=[],
-        use_ledger=True if ask_use_ledger else None,
+        use_jspace=True if ask_use_jspace else None,
         degraded=True,
     )
 
 
-def _plan_from(payload: dict[str, Any], *, ask_use_ledger: bool) -> Plan:
+def _plan_from(payload: dict[str, Any], *, ask_use_jspace: bool) -> Plan:
     # goal may be empty; harness forces plan.goal = original after parse.
     approach = payload.get("approach")
     if isinstance(approach, list):
@@ -1028,18 +1153,15 @@ def _plan_from(payload: dict[str, Any], *, ask_use_ledger: bool) -> Plan:
         approach = unknown or "\n".join(legacy)
     constraints = _str_list(payload.get("constraints"))
     verify_points = _str_list(payload.get("verify_points"))
-    use_ledger: bool | None = None
-    if ask_use_ledger:
-        if "use_ledger" not in payload:
-            use_ledger = True
-        else:
-            use_ledger = bool(payload.get("use_ledger"))
+    use_jspace: bool | None = None
+    if ask_use_jspace and "use_jspace" in payload:
+        use_jspace = bool(payload.get("use_jspace"))
     return Plan(
         goal=str(payload.get("goal") or "").strip(),
         approach=approach,
         constraints=constraints,
         verify_points=verify_points,
-        use_ledger=use_ledger,
+        use_jspace=use_jspace,
         summary=str(payload.get("summary") or "").strip(),
     )
 

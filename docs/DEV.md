@@ -18,8 +18,7 @@
 ```
 original.md
   → preprocess（fast 跳过）
-       standard/high：quadrants → factors → brief.json
-       max：meld → quadrants → factors → brief.json
+       standard/ledger/meld/graph：quadrants → factors → brief.json
   → loop
        plan.json → act → verify.json
        passed → stdout = 本轮 act 文本
@@ -48,9 +47,9 @@ flame/
   container/         # flame-worker Docker 镜像
   src/
     flame/           # 单机 plan-act-verify 编排
-      loop.py        # 主循环；plan.goal 强制；max 开图 init
+      loop.py        # 主循环；plan.goal 强制；graph 开图 init
       evidence.py    # tool trace + checks 句柄审计
-      preprocess.py  # meld / quadrants / factors → brief.json
+      preprocess.py  # quadrants / factors → brief.json
       prompts.py
       budget.py      # effort → 模块开关 + cycle_limit
       backend.py     # spawn agent + stream-json + timeout
@@ -67,7 +66,7 @@ flame/
 
 集群编排 **Flame Fleet** 在独立私有仓库（`flame-fleet`），不在本库。
 
-工作区 `.flame/` 常见产物：`original.md`、`brief.json`、`plan.json`、`verify.json`、`act_skill.json`、`tool_trace.json`；max 另有 `graph_seed.json`、`graph_run.json`。图本身在 `.fact-graph/runs/flame-act-cN/`。
+工作区 `.flame/` 常见产物：`original.md`、`brief.json`、`plan.json`、`verify.json`、`act_skill.json`、`tool_trace.json`；graph 另有 `graph_seed.json`、`graph_run.json`。图本身在 `.fact-graph/runs/flame-act-cN/`。
 
 ## 4. 拉起 agent
 
@@ -79,18 +78,17 @@ agent -p
      --workspace <workspace>
      --trust
      [--force]            # plan / act / verify
-     [--mode ask]         # preprocess: meld / quadrants / factors
+     [--mode ask]         # preprocess: quadrants / factors
      --
      <prompt>
 ```
 
 | 阶段 | mode | --force | 产物 |
 |---|---|---|---|
-| meld（max） | ask | 否 | `meld-judge.json`；写入 brief.judge |
 | quadrants | ask | 否 | 四格表 → brief |
 | factors | ask | 否 | success/failure ≤3 + decisive_move |
 | plan | 默认 | 是 | `plan.json`；失败则 stub |
-| act | 默认 | 是 | 仓库改动；`act_skill.json` |
+| act | 默认 | 是 | 仓库改动；`act_skill.json`。**meld**：三 Panel `ask` → Judge `ask`（点名 winner）→ 该席 `--force` 写 `answer.md` / `meld-judge.json` |
 | verify | 默认 | 是 | `verify.json`；无 JSON 则降级交付 act |
 
 ## 5. Effort
@@ -99,8 +97,9 @@ agent -p
 |---|---|---|---|---|
 | fast | 跳过 | 否 | 否 | 一轮 verify 后交付 |
 | standard | 四格表→因素 | 否 | 否 | verify 收；`FLAME_MAX_CYCLES` 默认 8 |
-| high | 同 standard | 否 | j-space（plan.`use_ledger`，默认 true） | 同 standard |
-| max | 同 high | 是 | fact-graph（固定） | 同 standard |
+| ledger | 同 standard | 否 | j-space（plan.`use_jspace`，默认 true） | 同 standard |
+| meld | 同 standard | 否（act 融合） | 否 | 同 standard；act = 三 Panel → Judge 点名 → 该席写 `answer.md` |
+| graph | 同 standard | 否 | fact-graph（固定；不开账本） | 同 standard |
 
 兼容别名：`low`→`fast`，`medium`→`standard`。
 
@@ -110,12 +109,12 @@ agent -p
 class Effort(StrEnum):
     fast = "fast"
     standard = "standard"
-    high = "high"
-    max = "max"
+    ledger = "ledger"
+    meld = "meld"
+    graph = "graph"
 
 @dataclass
 class Brief:
-    judge: dict | None
     quadrants: dict   # known_knowns / known_unknowns / unknown_knowns / unknown_unknowns
     success_factors: list[str]  # ≤3
     failure_factors: list[str]  # ≤3
@@ -127,7 +126,7 @@ class Plan:
     approach: str
     constraints: list[str]
     verify_points: list[str]
-    use_ledger: bool | None   # high only; default True
+    use_jspace: bool | None   # ledger only; default True
     degraded: bool
 ```
 
@@ -135,12 +134,12 @@ class Plan:
 
 ## 7. 协议
 
-prompt 第一行：`[Flame phase: meld|quadrants|factors|plan|act|verify]`。
+prompt 第一行：`[Flame phase: quadrants|factors|plan|act|verify]`。
 非 act 阶段一律带 Skill ban（禁止读 j-space / fact-graph / 任意 `SKILL.md`）；仅 act 在 effort 挂 skill 时加载。无 skill 的 act 同样禁止自开 skill。
 
 1. **preprocess**：只写 `brief.json`。任一步失败则该项留空；全空则无 brief。不问用户。
-2. **plan**：冲突优先级 **original > verify > brief**。brief 渲染为标签字段（decisive_move / factors / quadrants / meld_judge），不是整包 JSON。缺 brief 照样规划。**`plan.goal` 恒等于 original**（harness 强制覆盖，禁止代理成功态）。high 写 `use_ledger`（默认 true；短任务或明显多路径可 false）。
-3. **act**：按 original(=goal) / approach / constraints。**high** 且 `use_ledger` → j-space；**max** → fact-graph。harness 写 `.flame/graph_seed.json` 并 `init` 开板（act 只 `run`）：`goal`=original+verify_points，`constraints`=plan.constraints，`origin`=brief+上轮 verify，`hint`=approach。图探索 / Flame verify 质检；board `complete` ≠ Flame 通过。Act 可写工作区与 `act.json` / `answer.md`，不得改 `plan.json` / `verify.json`。
+2. **plan**：冲突优先级 **original > verify > brief**。brief 渲染为标签字段（decisive_move / factors / quadrants），不是整包 JSON。缺 brief 照样规划。**`plan.goal` 恒等于 original**（harness 强制覆盖，禁止代理成功态）。ledger 写 `use_jspace`（默认 true；短任务或明显多路径可 false）。
+3. **act**：按 original(=goal) / approach / constraints。**ledger** 且 `use_jspace` → j-space；**graph** → fact-graph（执行阶段不挂账本）。**meld**：同一工作区三 Panel 并行答题（只读），Judge 点名 winner，由该席合稿写 `answer.md`；无 j-space / fact-graph，容器不留。harness 写 `.flame/graph_seed.json` 并 `init` 开板（act 只 `run`，仅 graph）：`goal`=original+verify_points，`constraints`=plan.constraints，`origin`=brief+上轮 verify，`hint`=approach。图探索 / Flame verify 质检；board `complete` ≠ Flame 通过。Act 可写工作区与 `act.json` / `answer.md`，不得改 `plan.json` / `verify.json`。
 4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明与本轮 tool 句柄摘要）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。Harness 对阶段 JSON 做**格式硬检查**（必要字段与类型；禁止多余键。执行结束后若 `plan.json` / `verify.json` 被 act 改动，恢复定稿并记入 evidence；内容未变则不写盘）。Harness 对 `checks` 做**证据审计**（`evidence.py`：每项 check 须含显式 `path:` / `url:` / `` `command` ``；path 做 workspace 归一化；须存在且本轮 tool 触及；url/command 只认 trace，不出站。command 审计会去掉前导 `cd dir &&` 并按管道/链式分段匹配，不要求与 shell 原文逐字节相同）。另要求本轮 `answer.md`（或 `.flame/answer.md`，取较新者）的修改时间不早于**本轮第一次**写下的 `plan.json` 快照（界面只展示该文件；不要用盘面现时 mtime 当验收点；verify_points 不要验收 plan.json 键序）。审计是 verify 的一环：三项都落定后才采纳 `retry`；仅证据腿失败时强制 `retry=true`。`points_met` 且 `checks` 空 → 亦 `evidence_ok=false`。
 
 ## 8. 降级与退出码
@@ -159,7 +158,7 @@ prompt 第一行：`[Flame phase: meld|quadrants|factors|plan|act|verify]`。
 
 j-space 不打包；探测与安装见 [`SKILLS.md`](SKILLS.md)。fact-graph 在 `src/flame/data/fact-graph/`。
 
-max 的 meld：本机 `agent --model auto --mode ask`，三 Panel 并行 + Judge，不调外部 Fusion HTTP。
+effort=meld 的 act 融合：三 Panel `ask` + Judge 点名 + 选中席 `--force` 合稿；同一工作区，不留容器。
 
 ## 10. 进展与日志
 
@@ -176,7 +175,7 @@ JSONL：`.flame/logs/<session>.jsonl`（`start` / `phase` / `agent_done` / `act_
 ```
 flame run "任务" [--effort standard] [--workspace .] [--model auto] [--agent-bin agent] [--safety]
 flame continue "后续指令" [--workspace .] [--model auto] [--extra-budget 900]
-  # max only: read `.flame/graph_run.json`, orchestrator hint+run, then verify (skip preprocess/plan/init/act agent)
+  # graph only: read `.flame/graph_run.json`, orchestrator hint+run, then verify (skip preprocess/plan/init/act agent)
 flame skills
 flame version
 ```

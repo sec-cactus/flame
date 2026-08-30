@@ -22,15 +22,7 @@
 
 未满足，但需要提出新 intent 时返回：
 
-{"accepted": true, "data": {"intent": {"from": ["f001"], "description": "具体可执行的探索方向", "use_ledger": false}}}
-
-`use_ledger` 默认 false，可省略。仅当**同时**满足以下条件时才可设为 true：
-
-1. 提出后图上未结论的 open intent 将恰好为 1（当前 open_intents 为空，本条是唯一新枝；若已有未结论 intent，必须 false）。
-2. 该 intent 是长任务，需要多步深度推理才能收成一条 fact。
-3. 该 intent 本身无多路径分支风险（一条因果链 / 单点穿透，不是并行候选集）。
-
-不满足则 use_ledger=false。账本只用于单枝深挖；多枝并行时禁止挂账本。
+{"accepted": true, "data": {"intent": {"from": ["f001"], "description": "具体可执行的探索方向"}}}
 
 未满足，且当前不需要提出新 intent 时返回：
 
@@ -49,7 +41,6 @@
 - 不要提出与已验证无效路径同构的方向（同一无效路径模式的变体不算新方向）。
 - intent 应当是一步可执行的探索，描述具体到可行动；避免"继续调查""进一步分析"这类空泛表述。
 - complete 的 description 须说明约束如何被满足；intent 的 description 须点明针对哪条未满足约束、避开了哪类无效路径，以及将带来何种信息增益。
-- use_ledger 不是性格标签；默认 false。编排器会在 open intent≠1 时强制关闭账本。
 
 # 上下文
 

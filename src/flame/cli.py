@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_p = sub.add_parser("run", help="run a task through plan-act-verify")
     run_p.add_argument("task", nargs="+", help="task prompt")
-    run_p.add_argument("--effort", choices=["fast", "standard", "high", "max"], default=None)
+    run_p.add_argument("--effort", choices=["fast", "standard", "ledger", "meld", "graph"], default=None)
     run_p.add_argument("--workspace", default=None)
     run_p.add_argument("--model", default=None, help="agent model (cursor: auto; opencode: provider/model)")
     run_p.add_argument(
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cont_p = sub.add_parser(
         "continue",
-        help="max: hint + resume fact-graph from .flame/graph_run.json, then verify",
+        help="graph: hint + resume fact-graph from .flame/graph_run.json, then verify",
     )
     cont_p.add_argument("task", nargs="+", help="follow-up instruction (written as graph hint)")
     cont_p.add_argument("--workspace", default=None)
