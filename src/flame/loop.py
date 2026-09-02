@@ -169,7 +169,6 @@ def continue_run(
         workspace=cfg.workspace,
         cycle_trace=cycle_trace,
         act_note=act_note,
-        require_evidence_touch=False,
         plan_mtime=plan_mtime,
         schema_gaps=list(plan.schema_gaps),
     )
@@ -845,7 +844,6 @@ def _run_verify(
     workspace: Path,
     cycle_trace: evidence.ToolTrace,
     act_note: str = "",
-    require_evidence_touch: bool = True,
     plan_mtime: float | None = None,
     schema_gaps: list[str] | None = None,
 ) -> VerifyResult:
@@ -883,9 +881,6 @@ def _run_verify(
     verify = _verify_from_payload(
         payload,
         workspace=workspace,
-        trace=cycle_trace,
-        fail_open_if_no_trace=bool(act_note),
-        require_evidence_touch=require_evidence_touch,
         plan_mtime=plan_mtime,
         schema_gaps=schema_gaps,
     )
@@ -917,9 +912,6 @@ def _verify_from_payload(
     payload: dict[str, Any],
     *,
     workspace: Path | None = None,
-    trace: evidence.ToolTrace | None = None,
-    fail_open_if_no_trace: bool = False,
-    require_evidence_touch: bool = True,
     plan_mtime: float | None = None,
     schema_gaps: list[str] | None = None,
 ) -> VerifyResult:
@@ -936,37 +928,23 @@ def _verify_from_payload(
         points_met = bool(payload.get("passed"))
     aligned = True if "aligned" not in payload else bool(payload.get("aligned"))
     evidence_ok = True if "evidence_ok" not in payload else bool(payload.get("evidence_ok"))
-    if points_met and not checks:
-        evidence_ok = False
-        if not gaps:
-            gaps = ["points claimed met but no objective evidence handles in checks"]
-    if points_met and evidence_ok and workspace is not None and trace is not None:
-        audit = evidence.audit_checks(
-            checks,
-            workspace=workspace,
-            trace=trace,
-            fail_open_if_no_trace=fail_open_if_no_trace,
-            require_touch=require_evidence_touch,
-        )
-        for gap in audit.gaps:
-            if gap not in gaps:
-                gaps.append(gap)
-        if not audit.ok:
-            evidence_ok = False
+    answer_gaps: list[str] = []
     if workspace is not None and plan_mtime is not None:
-        for gap in schema.audit_answer_vs_plan(workspace, plan_mtime=plan_mtime):
+        answer_gaps = schema.audit_answer_vs_plan(workspace, plan_mtime=plan_mtime)
+        for gap in answer_gaps:
             if gap not in gaps:
                 gaps.append(gap)
-            if points_met:
-                evidence_ok = False
-    if format_gaps and points_met:
-        evidence_ok = False
-    passed = points_met and aligned and evidence_ok
+    # Evidence handles, checks wording, and file existence are the verify
+    # agent's judgment. Harness does not rewrite evidence_ok. The only hard
+    # delivery gate is a new answer.md this round.
+    passed = points_met and aligned and evidence_ok and not answer_gaps
     diagnosis = str(payload.get("diagnosis") or "")
     if not passed and not diagnosis:
         diagnosis = "verify rejected without diagnosis"
-    if not evidence_ok and gaps and "evidence" not in diagnosis.lower():
-        diagnosis = (diagnosis + "; " if diagnosis else "") + "evidence audit failed: " + gaps[0]
+    if answer_gaps:
+        first = answer_gaps[0]
+        if first not in diagnosis:
+            diagnosis = (diagnosis + "; " if diagnosis else "") + first
     summary = str(payload.get("summary") or "").strip()
     if not summary:
         summary = stage_summary.verify_summary(
@@ -979,12 +957,9 @@ def _verify_from_payload(
                 "diagnosis": diagnosis,
             }
         )
-    # Audit is part of verify. Decide retry only after all three legs settle.
-    # retry=false is for "more cycles cannot help" on a finished content judgment;
-    # evidence-only failure means verify is incomplete → keep cycling.
     if passed:
         retry = True
-    elif points_met and aligned and not evidence_ok:
+    elif answer_gaps:
         retry = True
     else:
         retry = bool(payload["retry"]) if "retry" in payload else True

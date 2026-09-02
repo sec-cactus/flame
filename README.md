@@ -52,7 +52,7 @@ flame run "…" --agent-backend opencode --model opencode-go/deepseek-v4-flash
 ✓ passed in 1 cycle(s)
 ```
 
-`plan.goal` is always the user request (harness overwrites). On **graph**, Flame writes `.flame/graph_seed.json` and inits `.fact-graph/runs/flame-act-cN/` before act; act only `run`s the orchestrator. Verify audits evidence handles in `checks` (exist + touched this cycle) — not a test replay.
+`plan.goal` is always the user request (harness overwrites). On **graph**, Flame writes `.flame/graph_seed.json` and inits `.fact-graph/runs/flame-act-cN/` before act; act only `run`s the orchestrator. Verify is the only judge of evidence; the harness only requires a new `answer.md` this round.
 
 ## Effort
 

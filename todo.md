@@ -1,20 +1,17 @@
 # Flame todos
 
-## Verify: audit evidence handles (not re-execution)
+## Verify: evidence is the agent's judgment
 
-**Status:** done
+**Status:** done (harness no longer second-guesses `checks`)
 
-**Principle:** Evidence check is an **audit**, not a replay.
+**Principle:** Evidence is the verify agent's call, not a harness replay.
 
-- Trust the model to be honest: it may hallucinate or err, but does not intentionally forge.
-- Do **not** re-run tests or re-derive conclusions in the harness (no Archon-style mechanical CI gate).
-- Do **not** enumerate task scenarios (code vs research, etc.).
-- Any conclusion that claims success must cite **objective evidence handles**.
-- Those handles must **really exist**, and this cycle must show they were **actually touched** (tool trace) — “done” and “exists”, not “correct”.
+- Trust the model to fill `evidence_ok` / `checks` / `evidence_gaps`.
+- Do **not** re-run tests or re-derive conclusions in the harness.
+- Do **not** flip `evidence_ok` because a cited path is missing, un-touched, or badly worded.
+- Harness still requires a **new `answer.md` this round**; missing/stale answer fails the round and retries.
 
-**Harness job:** collect act/verify tool traces; extract handles from `checks[]`; confirm each handle exists and appears in the trace; on failure set `evidence_ok=false` and fill `evidence_gaps`. Interpretation of evidence stays with the model.
-
-**Still true:** `points_met` with empty `checks` → `evidence_ok=false`.
+**Harness job:** collect tool traces for the verify prompt; restore mutated `plan.json` / `verify.json`; gate only on answer.md vs this round's plan snapshot.
 
 **Non-goal:** Mandatory bash/`pytest` pass-as-judge; scenario-specific rule tables.
 

@@ -20,7 +20,6 @@ from flame.loop import (
     _write_plan,
     run,
 )
-from flame.evidence import ToolTrace
 from flame.progress import Progress
 from flame.safety import SafetyDenied
 from flame.types import Effort, Plan
@@ -430,7 +429,7 @@ class LoopTests(unittest.TestCase):
         self.assertFalse(result.verify.retry if result.verify else True)
         self.assertIn("verify will not retry", buf.getvalue())
 
-    def test_evidence_audit_rejects_hallucinated_handle(self) -> None:
+    def test_harness_does_not_override_hallucinated_handle(self) -> None:
         os.environ["FLAME_FAKE_BAD_EVIDENCE"] = "1"
         workspace = self._workspace("bad_evidence")
         buf = io.StringIO()
@@ -440,14 +439,14 @@ class LoopTests(unittest.TestCase):
             progress=Progress(stream=buf),
         )
         self.assertTrue(result.passed, result.output)
-        self.assertGreaterEqual(result.cycles, 2)
-        self.assertIn("evidence_ok=False", buf.getvalue())
+        self.assertEqual(result.cycles, 1)
+        self.assertIn("evidence_ok=True", buf.getvalue())
         self.assertTrue((workspace / ".flame" / "tool_trace.json").is_file())
 
-    def test_audit_failure_forces_retry_despite_model_false(self) -> None:
+    def test_hallucinated_handle_does_not_flip_evidence_ok(self) -> None:
         workspace = self._workspace("audit_retry")
+        (workspace / "answer.md").write_text("fresh\n", encoding="utf-8")
         (workspace / "run.py").write_text("ok\n", encoding="utf-8")
-        trace = ToolTrace(paths={"run.py"})
         verify = _verify_from_payload(
             {
                 "points_met": True,
@@ -463,12 +462,11 @@ class LoopTests(unittest.TestCase):
                 "diagnosis": "",
             },
             workspace=workspace,
-            trace=trace,
+            plan_mtime=time.time() - 5,
         )
-        self.assertFalse(verify.passed)
-        self.assertFalse(verify.evidence_ok)
-        self.assertTrue(verify.retry)
-        self.assertNotIn("cancel/await", " ".join(verify.evidence_gaps))
+        self.assertTrue(verify.passed)
+        self.assertTrue(verify.evidence_ok)
+        self.assertFalse(any("no_such_file" in g for g in verify.evidence_gaps))
 
     def test_stale_answer_md_fails_verify(self) -> None:
         workspace = self._workspace("stale_answer")
@@ -495,15 +493,14 @@ class LoopTests(unittest.TestCase):
                 "diagnosis": "",
             },
             workspace=workspace,
-            trace=ToolTrace(paths={"run.py", "answer.md"}),
             plan_mtime=plan_mtime,
         )
         self.assertFalse(verify.passed)
-        self.assertFalse(verify.evidence_ok)
+        self.assertTrue(verify.evidence_ok)
         self.assertTrue(verify.retry)
         self.assertTrue(any("answer.md" in g for g in verify.evidence_gaps))
 
-    def test_plan_extra_keys_fail_when_points_met(self) -> None:
+    def test_plan_extra_keys_do_not_fail_verify(self) -> None:
         workspace = self._workspace("plan_extra")
         (workspace / "answer.md").write_text("fresh\n", encoding="utf-8")
         verify = _verify_from_payload(
@@ -518,13 +515,12 @@ class LoopTests(unittest.TestCase):
                 "diagnosis": "",
             },
             workspace=workspace,
-            trace=ToolTrace(paths={"answer.md"}),
             plan_mtime=time.time() - 5,
             schema_gaps=["plan.json extra keys after act: answer"],
         )
-        self.assertFalse(verify.passed)
-        self.assertFalse(verify.evidence_ok)
-        self.assertTrue(verify.retry)
+        self.assertTrue(verify.passed)
+        self.assertTrue(verify.evidence_ok)
+        self.assertTrue(any("extra keys" in g for g in verify.evidence_gaps))
 
     def test_restore_plan_skips_write_when_canonical(self) -> None:
         workspace = self._workspace("restore_plan_skip")
@@ -621,7 +617,7 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(gaps, ["verify.json was rewritten during act"])
         self.assertEqual(path.read_bytes(), before)
 
-    def test_act_mutating_plan_fails_evidence_and_restores(self) -> None:
+    def test_act_mutating_plan_restores_without_failing_verify(self) -> None:
         os.environ["FLAME_FAKE_MUTATE_PLAN"] = "1"
         workspace = self._workspace("act_mutate_plan")
         result = run(
@@ -629,13 +625,34 @@ class LoopTests(unittest.TestCase):
             config=self._cfg(workspace),
             progress=Progress(enabled=False),
         )
-        self.assertFalse(result.passed)
-        self.assertFalse(result.verify.evidence_ok if result.verify else False)
+        self.assertTrue(result.passed, result.output)
+        self.assertTrue(result.verify.evidence_ok if result.verify else False)
         plan = json.loads((workspace / ".flame" / "plan.json").read_text(encoding="utf-8"))
         self.assertNotIn("answer", plan)
         self.assertTrue(
             any("extra keys" in g for g in (result.verify.evidence_gaps if result.verify else []))
         )
+
+    def test_model_evidence_false_keeps_retry_false(self) -> None:
+        workspace = self._workspace("model_evidence_stop")
+        (workspace / "answer.md").write_text("fresh\n", encoding="utf-8")
+        verify = _verify_from_payload(
+            {
+                "points_met": True,
+                "aligned": True,
+                "evidence_ok": False,
+                "retry": False,
+                "checks": ["path: answer.md exists"],
+                "drift": [],
+                "evidence_gaps": ["could not confirm sources"],
+                "diagnosis": "evidence too thin",
+            },
+            workspace=workspace,
+            plan_mtime=time.time() - 5,
+        )
+        self.assertFalse(verify.passed)
+        self.assertFalse(verify.evidence_ok)
+        self.assertFalse(verify.retry)
 
     def test_content_failure_keeps_model_retry_false(self) -> None:
         verify = _verify_from_payload(
@@ -650,7 +667,6 @@ class LoopTests(unittest.TestCase):
                 "diagnosis": "not implementable",
             },
             workspace=self._workspace("content_retry"),
-            trace=ToolTrace(),
         )
         self.assertFalse(verify.passed)
         self.assertFalse(verify.retry)

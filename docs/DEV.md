@@ -31,7 +31,7 @@ original.md
 强制规则：
 
 1. act 必须能跑到
-2. 只有 `points_met ∧ aligned ∧ evidence_ok` 才算通过
+2. 只有 `points_met ∧ aligned ∧ evidence_ok` 且本轮有新 `answer.md` 才算通过
 3. act 非超时失败 → `FlameError`；act 超时 → 半成品交 verify（可 retry）
 
 ## 3. 目录
@@ -140,7 +140,7 @@ prompt 第一行：`[Flame phase: quadrants|factors|plan|act|verify]`。
 1. **preprocess**：只写 `brief.json`。任一步失败则该项留空；全空则无 brief。不问用户。
 2. **plan**：冲突优先级 **original > verify > brief**。brief 渲染为标签字段（decisive_move / factors / quadrants），不是整包 JSON。缺 brief 照样规划。**`plan.goal` 恒等于 original**（harness 强制覆盖，禁止代理成功态）。ledger 写 `use_jspace`（默认 true；短任务或明显多路径可 false）。
 3. **act**：按 original(=goal) / approach / constraints。**ledger** 且 `use_jspace` → j-space；**graph** → fact-graph（执行阶段不挂账本）。**meld**：同一工作区三 Panel 并行答题（只读），Judge 点名 winner，由该席合稿写 `answer.md`；无 j-space / fact-graph，容器不留。harness 写 `.flame/graph_seed.json` 并 `init` 开板（act 只 `run`，仅 graph）：`goal`=original+verify_points，`constraints`=plan.constraints，`origin`=brief+上轮 verify，`hint`=approach。图探索 / Flame verify 质检；board `complete` ≠ Flame 通过。Act 可写工作区与 `act.json` / `answer.md`，不得改 `plan.json` / `verify.json`。
-4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明与本轮 tool 句柄摘要）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。Harness 对阶段 JSON 做**格式硬检查**（必要字段与类型；禁止多余键。执行结束后若 `plan.json` / `verify.json` 被 act 改动，恢复定稿并记入 evidence；内容未变则不写盘）。Harness 对 `checks` 做**证据审计**（`evidence.py`：每项 check 须含显式 `path:` / `url:` / `` `command` ``；path 做 workspace 归一化；须存在且本轮 tool 触及；url/command 只认 trace，不出站。command 审计会去掉前导 `cd dir &&` 并按管道/链式分段匹配，不要求与 shell 原文逐字节相同）。另要求本轮 `answer.md`（或 `.flame/answer.md`，取较新者）的修改时间不早于**本轮第一次**写下的 `plan.json` 快照（界面只展示该文件；不要用盘面现时 mtime 当验收点；verify_points 不要验收 plan.json 键序）。审计是 verify 的一环：三项都落定后才采纳 `retry`；仅证据腿失败时强制 `retry=true`。`points_met` 且 `checks` 空 → 亦 `evidence_ok=false`。
+4. **verify**：只看 original + verify_points（及 harness 注入的 act 超时说明与本轮 tool 句柄摘要）。通过 → 交付 act 文本。`retry=false` → 交付 diagnosis。无 JSON → 交付 act。Harness 对阶段 JSON 做格式校验（必要字段与类型；禁止多余键；执行结束后若 `plan.json` / `verify.json` 被 act 改动则恢复定稿，缺口记入 `evidence_gaps`，**不改写** `evidence_ok`、不因此判失败）。`checks` 的存在性、是否触达、写法是否合格，由 verify agent 写入 `evidence_ok`，harness 不再改判、不再因此整轮重考。Harness **只硬卡**本轮 `answer.md`（或 `.flame/answer.md`，取较新者）的修改时间不早于本轮第一次写下的 `plan.json` 快照；缺新答卷则本轮不能过并强制再试。界面只展示该文件；不要用盘面现时 mtime 当验收点；verify_points 不要验收 plan.json 键序。`retry` 尊重模型（缺新 `answer.md` 除外）。
 
 ## 8. 降级与退出码
 

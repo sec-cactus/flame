@@ -411,7 +411,8 @@ def verify_prompt(
     trace_block = ""
     if tool_trace.strip():
         trace_block = (
-            "\nTool handles touched this cycle (harness audit source; prefer citing these):\n"
+            "\nTool handles touched this cycle (for your reference; you decide "
+            "whether they support the claims):\n"
             f"{tool_trace.strip()}\n"
         )
     return f"""[Flame phase: verify]
@@ -427,14 +428,11 @@ This cycle must have written or replaced answer.md (workspace root or `.flame/an
 Judge that file's content against the original request. The harness already checks it was written this round; do not use file mtimes as verify_points, and do not fail because live answer.md is older than live plan.json.
 Do not fail on plan.json key order or the goal field — the harness writes those.
 
-Every positive claim needs an objective evidence handle: a workspace path, a URL, or a `command` that was actually run. Prefer handles from the tool trace below when present. If you cannot cite a real handle, it is unsupported — do not invent files or links.
+You are the final evidence judge. After you write verify.json the harness will not change evidence_ok, will not check that cited files exist, and will not require that tools touched them this cycle.
+Every positive claim needs an objective evidence handle: a workspace path, a URL, or a command you actually ran. Prefer handles from the tool trace below when present. If you cannot confirm a cited file exists, set evidence_ok=false — do not invent files or links.
 In each checks[] line, cite handles explicitly: `path: re.json …`, `url: …`, or a backtick command. Use workspace-relative paths only (not host absolute paths or container-only prefixes like app/ unless that directory exists).
-A backtick command should copy a fragment that already appears in this cycle's tool trace; do not invent a longer pipeline than what ran.
-The harness audits that cited handles exist and were touched this cycle; it does not re-run your work.
 retry=true means continue; retry=false means stop burning budget.
-The harness finishes verify with an evidence audit of checks (exist + touched this cycle). That audit is part of verify — not a side gate.
 Set retry=false only when points/alignment already fail and more cycles cannot help.
-If evidence is the weak leg, leave retry=true so the next plan can fix handles.
 {status}{trace_block}
 Original user request:
 {original_task}
@@ -454,12 +452,12 @@ Write .flame/verify.json with this schema and no extra keys:
   "evidence_gaps": ["unsupported claims, or empty"],
   "diagnosis": "empty if done; otherwise what the next plan must change"
 }}
-passed is implied: points_met AND aligned AND evidence_ok.
+passed is implied: points_met AND aligned AND evidence_ok (the harness also requires a new answer.md this round).
 summary is user-facing; diagnosis is for the next plan (may be more technical).
 If verify_points is empty, judge only the original request.
 If you cannot judge at all, write nothing — the harness will deliver the act output.
 Set retry=false only when points/alignment already fail and more cycles cannot help
-(contradictory ask, missing user-only info, same failure would recur). Evidence gaps alone → leave retry=true.
+(contradictory ask, missing user-only info, same failure would recur).
 If act timed out, judge leftover workspace artifacts; do not treat silence as infeasibility.
 """
 

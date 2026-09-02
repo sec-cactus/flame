@@ -273,7 +273,7 @@ def _handle(phase: str, prompt: str, workspace: Path, flame_dir: Path, *, force:
         elif bad_evidence and not stamp.is_file():
             stamp.write_text("1\n", encoding="utf-8")
             checks = ["path: no_such_evidence_file_12345.txt supports the claim"]
-            retry = False  # model thinks success; harness audit must still force retry
+            retry = False  # model claims success; harness no longer overrides
         passed = points_met and aligned and evidence_ok
         payload = {
             "points_met": points_met,
