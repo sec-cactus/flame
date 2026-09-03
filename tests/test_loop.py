@@ -633,6 +633,28 @@ class LoopTests(unittest.TestCase):
             any("extra keys" in g for g in (result.verify.evidence_gaps if result.verify else []))
         )
 
+    def test_points_met_without_original_achieved_does_not_pass(self) -> None:
+        workspace = self._workspace("aligned_incomplete")
+        (workspace / "answer.md").write_text("still running, 59/182\n", encoding="utf-8")
+        verify = _verify_from_payload(
+            {
+                "points_met": True,
+                "aligned": False,
+                "evidence_ok": True,
+                "retry": True,
+                "checks": ["path: answer.md progress note"],
+                "drift": [],
+                "evidence_gaps": [],
+                "diagnosis": "original analysis not delivered yet",
+            },
+            workspace=workspace,
+            plan_mtime=time.time() - 5,
+        )
+        self.assertFalse(verify.passed)
+        self.assertTrue(verify.retry)
+        self.assertFalse(verify.aligned)
+        self.assertTrue(verify.points_met)
+
     def test_model_evidence_false_keeps_retry_false(self) -> None:
         workspace = self._workspace("model_evidence_stop")
         (workspace / "answer.md").write_text("fresh\n", encoding="utf-8")

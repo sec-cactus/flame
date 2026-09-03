@@ -424,6 +424,10 @@ Two contracts only:
 1. Original user request — did the work satisfy this, or only a proxy?
 2. verify_points — actually run min-fail checks. A check that must fail if the work is wrong.
 
+aligned is contract 1, and it means the original request is achieved — delivered, not merely still aimed at the same topic. Same direction with unfinished work is aligned=false. A progress note, a partial artifact, or a plan that shrank success into a checkpoint does not make aligned=true.
+points_met is contract 2 (the plan's verify_points). Those checks may pass while the original is still unmet; then points_met may be true and aligned must be false, so the loop does not finish.
+drift is how the work swapped or shrank the original ask. Incomplete work on the original is diagnosis, not drift.
+
 This cycle must have written or replaced answer.md (workspace root or `.flame/answer.md`).
 Judge that file's content against the original request. The harness already checks it was written this round; do not use file mtimes as verify_points, and do not fail because live answer.md is older than live plan.json.
 Do not fail on plan.json key order or the goal field — the harness writes those.

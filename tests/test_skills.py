@@ -133,6 +133,8 @@ class PromptSkillTests(unittest.TestCase):
         self.assertNotIn("Working task:", text)
         self.assertIn("Skill ban (this phase)", text)
         self.assertIn("do not use file mtimes as verify_points", text)
+        self.assertIn("aligned is contract 1", text)
+        self.assertIn("delivered, not merely still aimed at the same topic", text)
         self.assertNotIn("older than this cycle's `.flame/plan.json`", text)
 
     def test_verify_act_timeout_note(self) -> None:

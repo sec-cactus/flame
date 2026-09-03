@@ -123,7 +123,7 @@ class Plan:
 class VerifyResult:
     passed: bool
     points_met: bool
-    aligned: bool
+    aligned: bool  # original request achieved, not merely same topic
     evidence_ok: bool
     retry: bool
     checks: list[str] = field(default_factory=list)
